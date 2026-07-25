@@ -21,6 +21,8 @@ classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
@@ -46,6 +48,8 @@ dependencies = [
     "websocket-client>=1.6.0",
     "torch ; sys_platform == 'win32'",
     "pydantic>=2.0",
+    "pyobjc-framework-Quartz ; sys_platform == 'darwin'",
+    "dasbus ; sys_platform == 'linux'",
 ]
 
 [project.urls]

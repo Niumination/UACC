@@ -24,12 +24,12 @@ class WindowsDriver(BasePlatformDriver):
         result = []
         for w in wins:
             result.append(WindowInfo(
-                hwnd_or_id=w.hwnd,
+                hwnd_or_id=w.process_id or id(w),
                 title=w.title,
                 process_name=w.process_name,
                 process_id=w.process_id,
                 bounds=w.bounds,
-                is_active=w.is_active,
+                is_active=w.is_focused,
                 is_minimized=w.is_minimized,
                 is_maximized=w.is_maximized,
             ))

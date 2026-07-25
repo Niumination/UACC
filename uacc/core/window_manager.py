@@ -28,7 +28,7 @@ except Exception:
 
 
 def _is_zoomed(hwnd: int) -> bool:
-    """Check if a window is maximized, with fallback for missing IsZoomed."""
+    """Check if a window is maximized via win32gui (Windows only)."""
     try:
         import win32gui
         return bool(win32gui.IsZoomed(hwnd))
@@ -112,11 +112,11 @@ class WindowInfo:
             "is_maximized": self.is_maximized,
             "is_minimized": self.is_minimized,
         }
-        # Check for active security dialogs
-        security_msg = is_security_dialog_open()
-        if security_msg:
-            res["security_dialog_detected"] = True
-            res["security_dialog_message"] = security_msg
+        if sys.platform == "win32":
+            security_msg = is_security_dialog_open()
+            if security_msg:
+                res["security_dialog_detected"] = True
+                res["security_dialog_message"] = security_msg
         return res
 
 
