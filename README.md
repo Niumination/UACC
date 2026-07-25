@@ -41,7 +41,10 @@ UACC is a **pure Model Context Protocol (MCP) server**. It exposes 25+ pixel-pre
 
 | Feature | Description |
 |---------|-------------|
-| 🔌 **Pure MCP Server** | Works natively with Claude Code, Hermes, Cursor, OpenCode, OpenClaw, Claude Desktop |
+| 🔌 **Pure MCP Server** | Works natively with Claude Code, Hermes, Cursor, OpenCode, OpenClaw, Claude Desktop (55 tools) |
+| 🌐 **Browser DOM Bridge** | Chrome DevTools Protocol (CDP) integration for DOM-level CSS selector targeting (`browser_query`, `browser_click`) |
+| 🌐 **Cross-Platform** | Native platform drivers for Windows, macOS, and Linux |
+| 🛡️ **Self-Healing Actions** | Auto-retry fallback chain (a11y → OCR → vision) with visual action verification (`smart_click`, `verify_action`) |
 | 🤖 **Agent Agnostic** | Connect any MCP-compliant AI agent or custom MCP client |
 | 👁️ **Vision Optional** | Structured text map feeds allow text-only models to navigate with exact coordinates |
 | 🎯 **Pixel Precise** | Element locator, fuzzy button matching, sub-10px UI targeting |

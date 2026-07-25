@@ -1771,6 +1771,15 @@ def _populate_tool_registry() -> None:
         "paint_preset", "paint_image", "create_workflow", "list_workflows",
         "get_workflow", "delete_workflow", "run_workflow",
         "start_task", "get_task_status", "cancel_task", "list_tasks",
+        # Supreme tools
+        "take_snapshot", "compare_snapshots", "get_screen_diff", "verify_action",
+        "detect_elements_visual", "get_screen_info_enhanced",
+        "smart_click", "smart_type",
+        "find_element_relative", "find_element_near",
+        "get_system_info", "list_processes",
+        # Browser DOM Bridge (CDP)
+        "browser_query", "browser_get_page_info", "browser_execute_js",
+        "browser_wait_for", "browser_click", "browser_type", "browser_navigate",
     ]
     for name in known_tools:
         fn = globals().get(name)
@@ -2005,6 +2014,1346 @@ def uacc_planner(
 
     except Exception as exc:
         return json.dumps({"success": False, "error": format_error(exc, "Planner failed")})
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SCREEN DIFF & ACTION VERIFICATION
+# ═══════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def take_snapshot(name: str) -> str:
+    """Save a named screenshot of the current screen for later comparison.
+
+    Use this BEFORE performing an action so you can compare the screen
+    state before and after with compare_snapshots() or verify_action().
+
+    Args:
+        name: A descriptive name for this snapshot (e.g. "before_click",
+              "after_save", "initial_state"). Must be unique within the session.
+
+    Returns:
+        JSON with success status, snapshot name, and screen dimensions.
+    """
+    try:
+        img = capture_full()
+        session = get_session()
+        session.snapshots[name] = img
+        session.log_action("take_snapshot", {"name": name}, {"success": True})
+
+        return json.dumps({
+            "success": True,
+            "name": name,
+            "width": img.size[0],
+            "height": img.size[1],
+            "total_snapshots": len(session.snapshots),
+            "available_snapshots": list(session.snapshots.keys()),
+        })
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Take snapshot failed")})
+
+
+@mcp.tool()
+def compare_snapshots(
+    before_name: str,
+    after_name: str = "",
+    sensitivity: float = 0.5,
+) -> str:
+    """Compare two named snapshots to detect what changed on screen.
+
+    If after_name is omitted, captures the current screen as the "after" state.
+    Returns both pixel-level and semantic (text/element) differences.
+
+    Args:
+        before_name: Name of the "before" snapshot (taken with take_snapshot).
+        after_name: Name of the "after" snapshot. If empty, captures current screen.
+        sensitivity: Change threshold as percentage (0.0 = any pixel, 100.0 = total).
+
+    Returns:
+        JSON with changed status, changed_percentage, changed_regions, and semantic_diff.
+    """
+    try:
+        from uacc.core.screen_diff import compute_diff
+
+        session = get_session()
+        before_img = session.snapshots.get(before_name)
+        if before_img is None:
+            return json.dumps({
+                "success": False,
+                "error": f"Snapshot '{before_name}' not found. Available: {list(session.snapshots.keys())}",
+            })
+
+        if after_name:
+            after_img = session.snapshots.get(after_name)
+            if after_img is None:
+                return json.dumps({
+                    "success": False,
+                    "error": f"Snapshot '{after_name}' not found. Available: {list(session.snapshots.keys())}",
+                })
+        else:
+            after_img = capture_full()
+
+        # Get text maps for semantic diff
+        before_text = None
+        after_text = None
+        before_title = ""
+        after_title = ""
+        try:
+            _, _, before_tm, before_title = _scan_screen()
+            before_text = before_tm.to_compact_text()
+        except Exception:
+            pass
+        try:
+            _, _, after_tm, after_title = _scan_screen()
+            after_text = after_tm.to_compact_text()
+        except Exception:
+            pass
+
+        diff_result = compute_diff(
+            before_img, after_img,
+            before_text_map=before_text,
+            after_text_map=after_text,
+            before_window_title=before_title,
+            after_window_title=after_title,
+        )
+
+        regions_json = []
+        for r in diff_result.regions[:10]:
+            regions_json.append({
+                "bounds": {"left": r.bounds[0], "top": r.bounds[1], "right": r.bounds[2], "bottom": r.bounds[3]},
+                "size": f"{r.width}×{r.height}",
+                "pixel_count": r.pixel_count,
+                "intensity": r.change_intensity,
+            })
+
+        semantic_json = {}
+        if diff_result.semantic:
+            s = diff_result.semantic
+            semantic_json = {
+                "changed": s.changed,
+                "window_title_changed": s.window_title_changed,
+                "window_before": s.window_title_before,
+                "window_after": s.window_title_after,
+                "text_added": s.text_added[:10],
+                "text_removed": s.text_removed[:10],
+                "element_count_changed": s.element_count_changed,
+                "elements_before": s.element_count_before,
+                "elements_after": s.element_count_after,
+                "summary": s.summary,
+            }
+
+        session.log_action("compare_snapshots", {
+            "before": before_name, "after": after_name or "(current)",
+        }, {"success": True, "changed": diff_result.changed})
+
+        return json.dumps({
+            "success": True,
+            "changed": diff_result.changed,
+            "changed_percentage": diff_result.changed_percentage,
+            "total_pixels_changed": diff_result.total_pixels_changed,
+            "changed_regions": regions_json,
+            "semantic_diff": semantic_json,
+            "summary": diff_result.summary,
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Compare snapshots failed")})
+
+
+@mcp.tool()
+def get_screen_diff(
+    sensitivity: float = 0.5,
+) -> list[t.TextContent | t.ImageContent]:
+    """Capture a screenshot, compare to the last snapshot, and return a visual diff.
+
+    Automatically compares the current screen against the most recent
+    snapshot taken with take_snapshot(). Returns both the diff analysis
+    and a visual overlay image highlighting changed regions.
+
+    Args:
+        sensitivity: Minimum percentage of pixels that must differ to count as changed.
+
+    Returns:
+        JSON diff analysis and an annotated image with changed regions highlighted in red.
+    """
+    try:
+        from uacc.core.screen_diff import compute_diff, create_diff_visualization
+
+        session = get_session()
+        if not session.snapshots:
+            return [t.TextContent(type="text", text=json.dumps({
+                "success": False,
+                "error": "No snapshots taken yet. Call take_snapshot() first.",
+            }))]
+
+        # Use most recent snapshot as "before"
+        last_name = list(session.snapshots.keys())[-1]
+        before_img = session.snapshots[last_name]
+        after_img = capture_full()
+
+        diff_result = compute_diff(before_img, after_img)
+
+        # Create visual overlay
+        viz_img = create_diff_visualization(before_img, after_img, diff_result)
+        b64 = image_to_base64(viz_img, fmt="JPEG", quality=85)
+        media_type = get_image_media_type("JPEG")
+
+        regions_json = []
+        for r in diff_result.regions[:10]:
+            regions_json.append({
+                "bounds": {"left": r.bounds[0], "top": r.bounds[1], "right": r.bounds[2], "bottom": r.bounds[3]},
+                "size": f"{r.width}×{r.height}",
+                "intensity": r.change_intensity,
+            })
+
+        session.log_action("get_screen_diff", {"snapshot": last_name}, {
+            "success": True, "changed": diff_result.changed,
+        })
+
+        return [
+            t.TextContent(type="text", text=json.dumps({
+                "success": True,
+                "compared_against": last_name,
+                "changed": diff_result.changed,
+                "changed_percentage": diff_result.changed_percentage,
+                "changed_regions": regions_json,
+                "summary": diff_result.summary,
+            })),
+            t.ImageContent(type="image", data=b64, mimeType=media_type),
+        ]
+
+    except Exception as exc:
+        return [t.TextContent(type="text", text=json.dumps({
+            "success": False, "error": format_error(exc, "Screen diff failed"),
+        }))]
+
+
+@mcp.tool()
+def verify_action(
+    expected_change: str = "",
+    expected_text: str = "",
+    timeout_ms: int = 2000,
+) -> str:
+    """Verify that the last action had the expected effect on screen.
+
+    Compares the current screen against the most recent snapshot to check
+    if the expected change occurred. Call take_snapshot() BEFORE your action,
+    then verify_action() AFTER.
+
+    Args:
+        expected_change: Type of change expected — "any", "window_changed",
+                        "text_appeared", "elements_changed", "dialog_opened".
+        expected_text: Specific text that should now be visible on screen.
+        timeout_ms: How long to wait for the change to appear (default 2s).
+
+    Returns:
+        JSON with verified status, what changed, and confidence assessment.
+    """
+    try:
+        from uacc.core.screen_diff import compute_diff
+
+        session = get_session()
+        if not session.snapshots:
+            return json.dumps({
+                "success": False,
+                "error": "No snapshots taken. Call take_snapshot() before your action, then verify_action() after.",
+            })
+
+        last_name = list(session.snapshots.keys())[-1]
+        before_img = session.snapshots[last_name]
+
+        # Poll until change detected or timeout
+        import time as _time
+        deadline = _time.time() + timeout_ms / 1000
+        verified = False
+        diff_result = None
+        after_text = ""
+        after_title = ""
+
+        while _time.time() < deadline:
+            after_img = capture_full()
+
+            # Get current screen state for semantic comparison
+            try:
+                _, _, after_tm, after_title = _scan_screen()
+                after_text = after_tm.to_compact_text()
+            except Exception:
+                pass
+
+            diff_result = compute_diff(before_img, after_img, after_text_map=after_text, after_window_title=after_title)
+
+            # Check based on expected_change type
+            if expected_change == "any" and diff_result.changed:
+                verified = True
+                break
+            elif expected_change == "window_changed" and diff_result.semantic and diff_result.semantic.window_title_changed:
+                verified = True
+                break
+            elif expected_change == "text_appeared" and expected_text:
+                if expected_text.lower() in after_text.lower():
+                    verified = True
+                    break
+            elif expected_change == "elements_changed" and diff_result.semantic and diff_result.semantic.element_count_changed:
+                verified = True
+                break
+            elif expected_change == "dialog_opened" and diff_result.semantic:
+                sem = diff_result.semantic
+                if sem.element_count_changed and sem.element_count_after > sem.element_count_before:
+                    verified = True
+                    break
+            elif not expected_change and diff_result.changed:
+                verified = True
+                break
+
+            _time.sleep(0.25)
+
+        # Build result
+        result = {
+            "success": True,
+            "verified": verified,
+            "compared_against_snapshot": last_name,
+            "expected_change": expected_change or "any",
+        }
+
+        if diff_result:
+            result["screen_changed"] = diff_result.changed
+            result["changed_percentage"] = diff_result.changed_percentage
+            result["summary"] = diff_result.summary
+            if diff_result.semantic:
+                result["semantic_summary"] = diff_result.semantic.summary
+
+        if expected_text:
+            result["expected_text_found"] = expected_text.lower() in after_text.lower()
+
+        if not verified:
+            result["recommendation"] = (
+                "Action may not have had the expected effect. "
+                "Consider retrying or using a different approach."
+            )
+
+        session.log_action("verify_action", {
+            "expected_change": expected_change, "expected_text": expected_text,
+        }, {"success": True, "verified": verified})
+
+        return json.dumps(result)
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Verify action failed")})
+
+
+# ═══════════════════════════════════════════════════════════════
+#  VISION DETECTOR — OmniParser-style fallback for apps without a11y
+# ═══════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def detect_elements_visual(
+    region_x: int | None = None,
+    region_y: int | None = None,
+    width: int | None = None,
+    height: int | None = None,
+    min_confidence: float = 0.3,
+) -> str:
+    """Detect UI elements using computer vision (OCR + edge detection).
+
+    Use this as a FALLBACK when get_screen_info returns few elements —
+    for example with games, remote desktop, canvas-based web apps,
+    or applications with broken accessibility trees.
+
+    Combines OCR text detection with contour analysis to find buttons,
+    inputs, and labels that the accessibility tree misses.
+
+    Args:
+        region_x: Optional left edge of scan region (full screen if omitted).
+        region_y: Optional top edge of scan region.
+        width: Width of scan region.
+        height: Height of scan region.
+        min_confidence: Minimum detection confidence (0.0–1.0).
+
+    Returns:
+        JSON with detected elements, their types, labels, and coordinates.
+    """
+    try:
+        from uacc.core.vision_detector import full_vision_detect
+
+        if region_x is not None and region_y is not None and width and height:
+            img = capture_region(region_x, region_y, width, height)
+        else:
+            img = capture_full()
+
+        elements = full_vision_detect(img)
+
+        # Filter by confidence (approximate from source)
+        results = []
+        for el in elements:
+            entry = {
+                "id": el.id,
+                "type": el.element_type,
+                "text": el.text,
+                "center": {"x": el.center[0], "y": el.center[1]},
+                "bounds": {
+                    "left": el.bounds[0], "top": el.bounds[1],
+                    "right": el.bounds[2], "bottom": el.bounds[3],
+                },
+                "clickable": el.clickable,
+                "editable": el.editable,
+                "source": getattr(el, "source", "vision"),
+            }
+            # Offset coordinates if scanning a region
+            if region_x is not None and region_y is not None:
+                entry["center"]["x"] += region_x
+                entry["center"]["y"] += region_y
+                entry["bounds"]["left"] += region_x
+                entry["bounds"]["top"] += region_y
+                entry["bounds"]["right"] += region_x
+                entry["bounds"]["bottom"] += region_y
+            results.append(entry)
+
+        session = get_session()
+        session.log_action("detect_elements_visual", {
+            "region": f"({region_x},{region_y},{width},{height})" if region_x is not None else "full",
+        }, {"success": True, "elements": len(results)})
+
+        return json.dumps({
+            "success": True,
+            "method": "vision (OCR + contour detection)",
+            "element_count": len(results),
+            "elements": results,
+            "tip": "Use click(x, y) with center coordinates to interact.",
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Visual detection failed")})
+
+
+@mcp.tool()
+def get_screen_info_enhanced(
+    mode: str = "auto",
+    include_ocr: bool = False,
+) -> str:
+    """Enhanced screen analysis that auto-selects the best detection method.
+
+    Modes:
+    - "auto": Try accessibility tree first; if < 5 elements found, fall back to vision.
+    - "accessibility": Use OS accessibility tree only (fastest, most reliable).
+    - "vision": Use OCR + edge detection only (for games, canvas, remote desktop).
+    - "hybrid": Merge accessibility tree AND vision results for maximum coverage.
+
+    Args:
+        mode: Detection mode — "auto", "accessibility", "vision", or "hybrid".
+        include_ocr: If True, also run OCR in accessibility mode (slower but more text).
+
+    Returns:
+        JSON with screen elements, method used, and element count.
+    """
+    try:
+        from uacc.core.vision_detector import full_vision_detect
+
+        session = get_session()
+        screen_w, screen_h = get_screen_size()
+        all_elements = []
+        method_used = mode
+
+        # Accessibility tree scan
+        a11y_elements = []
+        if mode in ("auto", "accessibility", "hybrid"):
+            try:
+                _, _, text_map, active_window = _scan_screen(include_ocr=include_ocr)
+                a11y_elements = text_map.all_elements
+            except Exception as exc:
+                logger.warning("Accessibility scan failed: %s", exc)
+
+        # Vision scan
+        vision_elements = []
+        if mode == "vision" or mode == "hybrid" or (mode == "auto" and len(a11y_elements) < 5):
+            try:
+                img = capture_full()
+                vision_elements = full_vision_detect(img)
+                if mode == "auto":
+                    method_used = "auto→vision (accessibility returned < 5 elements)"
+            except Exception as exc:
+                logger.warning("Vision scan failed: %s", exc)
+
+        # Merge results
+        if mode == "hybrid" or (mode == "auto" and vision_elements):
+            # Deduplicate: if an a11y element overlaps a vision element, keep the a11y one
+            a11y_bounds = set()
+            for el in a11y_elements:
+                a11y_bounds.add(el.bounds)
+            for vel in vision_elements:
+                if vel.bounds not in a11y_bounds:
+                    a11y_elements.append(vel)
+            all_elements = a11y_elements
+            if mode == "hybrid":
+                method_used = f"hybrid (a11y: {len(a11y_elements) - len(vision_elements)}, vision: {len(vision_elements)})"
+        elif mode == "vision":
+            all_elements = vision_elements
+        else:
+            all_elements = a11y_elements
+
+        # Format results
+        results = []
+        for el in all_elements:
+            results.append({
+                "id": el.id,
+                "type": el.element_type,
+                "text": el.text,
+                "center": {"x": el.center[0], "y": el.center[1]},
+                "bounds": {
+                    "left": el.bounds[0], "top": el.bounds[1],
+                    "right": el.bounds[2], "bottom": el.bounds[3],
+                },
+                "clickable": el.clickable,
+                "editable": el.editable,
+                "source": getattr(el, "source", "accessibility"),
+            })
+
+        interactive_count = sum(1 for el in all_elements if el.clickable or el.editable)
+
+        session.log_action("get_screen_info_enhanced", {
+            "mode": mode,
+        }, {"success": True, "method": method_used, "elements": len(results)})
+
+        return json.dumps({
+            "success": True,
+            "method": method_used,
+            "screen_width": screen_w,
+            "screen_height": screen_h,
+            "total_elements": len(results),
+            "interactive_elements": interactive_count,
+            "elements": results,
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Enhanced screen info failed")})
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SELF-HEALING SMART ACTIONS
+# ═══════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def smart_click(
+    target: str,
+    element_type: str | None = None,
+    button: str = "left",
+    verify: bool = True,
+    max_retries: int = 3,
+    reasoning: str = "",
+) -> str:
+    """Self-healing click — finds an element using multiple strategies and auto-retries.
+
+    Fallback chain:
+    1. Accessibility tree fuzzy match (fastest, most reliable)
+    2. OCR text search (catches rendered text that a11y misses)
+    3. Vision contour + OCR detection (for custom UI / games)
+    4. Returns failure with diagnostic info
+
+    If verify=True, captures before/after screenshots to confirm the click
+    had an observable effect on the screen.
+
+    Args:
+        target: The text label or name of the element to click (fuzzy matched).
+        element_type: Optional type filter (button, menu_item, text_input, etc.).
+        button: Mouse button — "left", "right", or "middle".
+        verify: If True, verify the click changed the screen state.
+        max_retries: Maximum retry attempts across strategies (default 3).
+        reasoning: Why you're clicking (for logging).
+
+    Returns:
+        JSON with success, method_used, retries, coordinates, and verification result.
+    """
+    try:
+        session = get_session()
+        executor = _get_executor()
+        attempts = []
+        click_x, click_y = 0, 0
+        method_used = ""
+
+        # Take "before" snapshot for verification
+        before_img = None
+        if verify:
+            before_img = capture_full()
+
+        for attempt in range(max_retries):
+            # Strategy 1: Accessibility tree
+            if attempt == 0:
+                try:
+                    find_result = click_element_by_name(
+                        name=target,
+                        element_type=element_type,
+                        button=button,
+                    )
+                    if find_result["success"]:
+                        click_x = find_result["click_x"]
+                        click_y = find_result["click_y"]
+                        method_used = "accessibility"
+
+                        action = ClickAction(
+                            x=click_x, y=click_y,
+                            button=MouseButton(button), count=1,
+                            reasoning=reasoning or f"Smart click '{target}'",
+                        )
+                        exec_result = executor.execute(action)
+                        if exec_result["success"]:
+                            attempts.append({"strategy": "accessibility", "success": True})
+                            break
+                    attempts.append({"strategy": "accessibility", "success": False, "reason": find_result.get("message", "Not found")})
+                except Exception as e:
+                    attempts.append({"strategy": "accessibility", "error": str(e)})
+
+            # Strategy 2: OCR text search
+            if attempt <= 1:
+                try:
+                    from uacc.core.ocr_engine import extract_text
+                    img = capture_full()
+                    ocr_results = extract_text(img)
+                    target_lower = target.lower()
+
+                    best_match = None
+                    best_score = 0
+                    for ocr in ocr_results:
+                        text = ocr.text.strip().lower()
+                        if target_lower in text or text in target_lower:
+                            score = len(target_lower) / max(len(text), 1)
+                            if score > best_score:
+                                best_score = score
+                                best_match = ocr
+
+                    if best_match:
+                        click_x = (best_match.bounds[0] + best_match.bounds[2]) // 2
+                        click_y = (best_match.bounds[1] + best_match.bounds[3]) // 2
+                        method_used = "ocr"
+
+                        action = ClickAction(
+                            x=click_x, y=click_y,
+                            button=MouseButton(button), count=1,
+                            reasoning=reasoning or f"Smart click (OCR) '{target}'",
+                        )
+                        exec_result = executor.execute(action)
+                        if exec_result["success"]:
+                            attempts.append({"strategy": "ocr", "success": True, "matched_text": best_match.text})
+                            break
+                    attempts.append({"strategy": "ocr", "success": False, "reason": "No OCR match found"})
+                except Exception as e:
+                    attempts.append({"strategy": "ocr", "error": str(e)})
+
+            # Strategy 3: Full vision detection
+            if attempt <= 2:
+                try:
+                    from uacc.core.vision_detector import full_vision_detect
+                    img = capture_full()
+                    vision_elements = full_vision_detect(img)
+
+                    target_lower = target.lower()
+                    best_el = None
+                    best_score = 0
+                    for el in vision_elements:
+                        if el.text and target_lower in el.text.lower():
+                            score = len(target_lower) / max(len(el.text), 1)
+                            if score > best_score:
+                                best_score = score
+                                best_el = el
+
+                    if best_el:
+                        click_x = best_el.center[0]
+                        click_y = best_el.center[1]
+                        method_used = "vision"
+
+                        action = ClickAction(
+                            x=click_x, y=click_y,
+                            button=MouseButton(button), count=1,
+                            reasoning=reasoning or f"Smart click (vision) '{target}'",
+                        )
+                        exec_result = executor.execute(action)
+                        if exec_result["success"]:
+                            attempts.append({"strategy": "vision", "success": True, "matched_text": best_el.text})
+                            break
+                    attempts.append({"strategy": "vision", "success": False, "reason": "No vision match found"})
+                except Exception as e:
+                    attempts.append({"strategy": "vision", "error": str(e)})
+
+        success = any(a.get("success") for a in attempts)
+
+        # Verification
+        verification = None
+        if verify and success and before_img:
+            time.sleep(0.3)  # Brief pause for UI to update
+            from uacc.core.screen_diff import has_changed
+            after_img = capture_full()
+            screen_changed = has_changed(before_img, after_img)
+            verification = {
+                "screen_changed": screen_changed,
+                "confidence": "high" if screen_changed else "low",
+            }
+            if not screen_changed:
+                verification["warning"] = "Click executed but no visible screen change detected"
+
+        session.log_action("smart_click", {
+            "target": target, "method": method_used, "verify": verify,
+        }, {"success": success, "attempts": len(attempts)})
+
+        return json.dumps({
+            "success": success,
+            "target": target,
+            "method_used": method_used,
+            "coordinates": {"x": click_x, "y": click_y} if success else None,
+            "attempts": attempts,
+            "total_retries": len(attempts),
+            "verification": verification,
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Smart click failed")})
+
+
+@mcp.tool()
+def smart_type(
+    text: str,
+    target_field: str = "",
+    clear_first: bool = False,
+    verify: bool = True,
+    reasoning: str = "",
+) -> str:
+    """Self-healing type — optionally finds and focuses an input field first, then types.
+
+    If target_field is provided, uses smart_click to find and focus the field
+    before typing. Optionally clears existing content first.
+
+    Args:
+        text: The text to type.
+        target_field: Name of the input field to find and click first (optional).
+                     If empty, types at the current cursor position.
+        clear_first: If True, select all (Ctrl+A) and delete before typing.
+        verify: If True, verify the text was typed by reading clipboard.
+        reasoning: Why you're typing this (for logging).
+
+    Returns:
+        JSON with success status, field targeting result, and verification.
+    """
+    try:
+        session = get_session()
+        executor = _get_executor()
+        field_result = None
+
+        # Step 1: Find and focus the target field
+        if target_field:
+            smart_click_raw = smart_click(
+                target=target_field,
+                element_type="text_input",
+                verify=False,
+            )
+            field_result = json.loads(smart_click_raw)
+            if not field_result["success"]:
+                # Retry without type filter
+                smart_click_raw = smart_click(
+                    target=target_field,
+                    verify=False,
+                )
+                field_result = json.loads(smart_click_raw)
+
+            if not field_result["success"]:
+                return json.dumps({
+                    "success": False,
+                    "error": f"Could not find input field '{target_field}'",
+                    "field_search": field_result,
+                })
+            time.sleep(0.2)
+
+        # Step 2: Clear existing content if requested
+        if clear_first:
+            executor.execute(HotkeyAction(keys=["ctrl", "a"]))
+            time.sleep(0.1)
+            executor.execute(HotkeyAction(keys=["delete"]))
+            time.sleep(0.1)
+
+        # Step 3: Type the text
+        action = TypeAction(text=text, delay_ms=0, reasoning=reasoning)
+        type_result = executor.execute(action)
+
+        # Step 4: Verify text was entered
+        verification = None
+        if verify and type_result["success"]:
+            time.sleep(0.2)
+            # Select all and copy to verify
+            executor.execute(HotkeyAction(keys=["ctrl", "a"]))
+            time.sleep(0.1)
+            executor.execute(HotkeyAction(keys=["ctrl", "c"]))
+            time.sleep(0.1)
+            clip_result = _clipboard_read()
+            if clip_result["success"]:
+                clipboard_text = clip_result.get("text", "")
+                text_found = text in clipboard_text
+                verification = {
+                    "text_verified": text_found,
+                    "clipboard_content": clipboard_text[:200],
+                }
+
+        session.log_action("smart_type", {
+            "text_length": len(text),
+            "target_field": target_field,
+            "clear_first": clear_first,
+        }, {"success": type_result["success"]})
+
+        return json.dumps({
+            "success": type_result["success"],
+            "characters_typed": len(text),
+            "field_targeting": field_result,
+            "clear_first": clear_first,
+            "verification": verification,
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Smart type failed")})
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SPATIAL QUERY ENGINE
+# ═══════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def find_element_relative(
+    anchor: str,
+    direction: str,
+    target_type: str = "",
+    max_distance_px: int = 300,
+) -> str:
+    """Find UI elements by spatial relationship to a reference element.
+
+    Example: find_element_relative(anchor="Email", direction="below", target_type="text_input")
+    finds the input field below the "Email" label.
+
+    Args:
+        anchor: Name of the reference element to search from.
+        direction: Spatial direction — "above", "below", "left_of", "right_of", "nearest".
+        target_type: Optional element type filter (button, text_input, etc.).
+        max_distance_px: Maximum pixel distance to search (default 300).
+
+    Returns:
+        JSON with matching elements sorted by distance from the anchor.
+    """
+    try:
+        session = get_session()
+        # Refresh screen data
+        screen_w, screen_h, text_map, _ = _scan_screen()
+        all_elements = text_map.all_elements
+
+        # Find anchor element
+        anchor_lower = anchor.lower()
+        anchor_el = None
+        for el in all_elements:
+            if anchor_lower in el.text.lower():
+                anchor_el = el
+                break
+
+        if not anchor_el:
+            return json.dumps({
+                "success": False,
+                "error": f"Anchor element '{anchor}' not found on screen.",
+            })
+
+        ax, ay = anchor_el.center
+
+        # Search for elements in the specified direction
+        candidates = []
+        for el in all_elements:
+            if el.id == anchor_el.id:
+                continue
+            if target_type and el.element_type != target_type:
+                continue
+
+            ex, ey = el.center
+            dx = ex - ax
+            dy = ey - ay
+            distance = (dx**2 + dy**2) ** 0.5
+
+            if distance > max_distance_px:
+                continue
+
+            # Direction filtering
+            matches_direction = False
+            if direction == "nearest":
+                matches_direction = True
+            elif direction == "below" and dy > 10:
+                matches_direction = True
+            elif direction == "above" and dy < -10:
+                matches_direction = True
+            elif direction == "right_of" and dx > 10:
+                matches_direction = True
+            elif direction == "left_of" and dx < -10:
+                matches_direction = True
+
+            if matches_direction:
+                candidates.append({
+                    "id": el.id,
+                    "type": el.element_type,
+                    "text": el.text,
+                    "center": {"x": ex, "y": ey},
+                    "bounds": {"left": el.bounds[0], "top": el.bounds[1], "right": el.bounds[2], "bottom": el.bounds[3]},
+                    "clickable": el.clickable,
+                    "editable": el.editable,
+                    "distance_px": round(distance),
+                    "direction_from_anchor": direction,
+                })
+
+        # Sort by distance
+        candidates.sort(key=lambda c: c["distance_px"])
+
+        session.log_action("find_element_relative", {
+            "anchor": anchor, "direction": direction, "target_type": target_type,
+        }, {"success": True, "matches": len(candidates)})
+
+        return json.dumps({
+            "success": True,
+            "anchor": {"name": anchor_el.text, "center": {"x": ax, "y": ay}},
+            "direction": direction,
+            "matches": len(candidates),
+            "elements": candidates[:15],
+            "tip": "Use click(x, y) with center coordinates of the best match.",
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Find relative failed")})
+
+
+@mcp.tool()
+def find_element_near(
+    x: int,
+    y: int,
+    radius_px: int = 150,
+    element_type: str = "",
+) -> str:
+    """Find all UI elements near a specific screen coordinate.
+
+    Useful for discovering what's around a specific point when you
+    know approximately where an element should be.
+
+    Args:
+        x: X coordinate to search around.
+        y: Y coordinate to search around.
+        radius_px: Search radius in pixels (default 150).
+        element_type: Optional element type filter.
+
+    Returns:
+        JSON with nearby elements sorted by distance from (x, y).
+    """
+    try:
+        session = get_session()
+        _, _, text_map, _ = _scan_screen()
+        all_elements = text_map.all_elements
+
+        nearby = []
+        for el in all_elements:
+            if element_type and el.element_type != element_type:
+                continue
+            ex, ey = el.center
+            distance = ((ex - x)**2 + (ey - y)**2) ** 0.5
+            if distance <= radius_px:
+                nearby.append({
+                    "id": el.id,
+                    "type": el.element_type,
+                    "text": el.text,
+                    "center": {"x": ex, "y": ey},
+                    "bounds": {"left": el.bounds[0], "top": el.bounds[1], "right": el.bounds[2], "bottom": el.bounds[3]},
+                    "clickable": el.clickable,
+                    "editable": el.editable,
+                    "distance_px": round(distance),
+                })
+
+        nearby.sort(key=lambda n: n["distance_px"])
+
+        session.log_action("find_element_near", {
+            "x": x, "y": y, "radius": radius_px,
+        }, {"success": True, "matches": len(nearby)})
+
+        return json.dumps({
+            "success": True,
+            "search_center": {"x": x, "y": y},
+            "radius_px": radius_px,
+            "matches": len(nearby),
+            "elements": nearby[:20],
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Find near failed")})
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SYSTEM & PROCESS INSPECTION
+# ═══════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def get_system_info() -> str:
+    """Get system hardware and OS information.
+
+    Returns CPU count, RAM, disk usage, OS version, display scaling,
+    and Python environment details.
+
+    Returns:
+        JSON with system information.
+    """
+    try:
+        import platform
+        import psutil
+
+        cpu_pct = psutil.cpu_percent(interval=0.5)
+        mem = psutil.virtual_memory()
+        disk = psutil.disk_usage("/")
+
+        screen_w, screen_h = get_screen_size()
+        monitors = _list_monitors()
+
+        return json.dumps({
+            "success": True,
+            "os": {
+                "system": platform.system(),
+                "release": platform.release(),
+                "version": platform.version(),
+                "machine": platform.machine(),
+            },
+            "cpu": {
+                "count": psutil.cpu_count(),
+                "usage_percent": cpu_pct,
+            },
+            "memory": {
+                "total_gb": round(mem.total / (1024**3), 1),
+                "available_gb": round(mem.available / (1024**3), 1),
+                "usage_percent": mem.percent,
+            },
+            "disk": {
+                "total_gb": round(disk.total / (1024**3), 1),
+                "free_gb": round(disk.free / (1024**3), 1),
+                "usage_percent": round(disk.percent, 1),
+            },
+            "display": {
+                "primary_width": screen_w,
+                "primary_height": screen_h,
+                "monitor_count": len(monitors),
+            },
+            "python_version": platform.python_version(),
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "System info failed")})
+
+
+@mcp.tool()
+def list_processes(
+    filter_name: str = "",
+    sort_by: str = "memory",
+    limit: int = 25,
+) -> str:
+    """List running processes with their resource usage.
+
+    Args:
+        filter_name: Optional filter — only show processes matching this name (case-insensitive).
+        sort_by: Sort by "memory", "cpu", or "name".
+        limit: Maximum number of processes to return (default 25).
+
+    Returns:
+        JSON with list of processes (name, pid, cpu%, memory, status).
+    """
+    try:
+        import psutil
+
+        processes = []
+        for proc in psutil.process_iter(["pid", "name", "cpu_percent", "memory_info", "status"]):
+            try:
+                info = proc.info
+                name = info.get("name", "")
+                if filter_name and filter_name.lower() not in name.lower():
+                    continue
+
+                mem_info = info.get("memory_info")
+                mem_mb = round(mem_info.rss / (1024**2), 1) if mem_info else 0
+
+                processes.append({
+                    "pid": info["pid"],
+                    "name": name,
+                    "cpu_percent": info.get("cpu_percent", 0) or 0,
+                    "memory_mb": mem_mb,
+                    "status": info.get("status", "unknown"),
+                })
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+
+        # Sort
+        if sort_by == "memory":
+            processes.sort(key=lambda p: p["memory_mb"], reverse=True)
+        elif sort_by == "cpu":
+            processes.sort(key=lambda p: p["cpu_percent"], reverse=True)
+        elif sort_by == "name":
+            processes.sort(key=lambda p: p["name"].lower())
+
+        processes = processes[:limit]
+
+        return json.dumps({
+            "success": True,
+            "count": len(processes),
+            "filter": filter_name or "(all)",
+            "sorted_by": sort_by,
+            "processes": processes,
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "List processes failed")})
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BROWSER DOM BRIDGE (Chrome DevTools Protocol)
+# ═══════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def browser_query(
+    selector: str,
+    all_matches: bool = False,
+    limit: int = 25,
+) -> str:
+    """Find DOM element(s) by CSS selector in active browser tab via CDP.
+
+    Bridges web automation precision with OS control. Returns matching elements,
+    their text, attributes, DOM bounding box, and screen center coordinates.
+
+    Args:
+        selector: CSS selector (e.g. "input[type='email']", "#submit-btn", "a.nav-link").
+        all_matches: If True, return all matching elements (up to limit). Default False.
+        limit: Maximum number of elements to return when all_matches=True.
+
+    Returns:
+        JSON with matching DOM element(s) and their screen coordinates.
+    """
+    try:
+        from uacc.core.cdp_bridge import auto_connect
+        bridge = auto_connect()
+        if not bridge.connected:
+            return json.dumps({
+                "success": False,
+                "error": "No browser with remote debugging detected. Launch Chrome/Edge with --remote-debugging-port=9222",
+            })
+
+        if all_matches:
+            elements = bridge.query_selector_all(selector, limit=limit)
+            return json.dumps({
+                "success": True,
+                "selector": selector,
+                "count": len(elements),
+                "elements": [e.to_dict() for e in elements],
+            })
+        else:
+            element = bridge.query_selector(selector)
+            if not element:
+                return json.dumps({
+                    "success": False,
+                    "error": f"No element found matching CSS selector '{selector}'",
+                })
+            return json.dumps({
+                "success": True,
+                "selector": selector,
+                "element": element.to_dict(),
+            })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Browser query failed")})
+
+
+@mcp.tool()
+def browser_get_page_info() -> str:
+    """Get rich metadata and structural summary of the active browser tab via CDP.
+
+    Returns page URL, title, domain, viewport dimensions, and counts of interactive
+    elements (forms, links, inputs, buttons, images).
+
+    Returns:
+        JSON with comprehensive browser page state.
+    """
+    try:
+        from uacc.core.cdp_bridge import auto_connect
+        bridge = auto_connect()
+        if not bridge.connected:
+            return json.dumps({
+                "success": False,
+                "error": "No browser with remote debugging detected. Launch Chrome/Edge with --remote-debugging-port=9222",
+            })
+
+        info = bridge.get_page_info()
+        return json.dumps({
+            "success": True,
+            "page": info,
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Browser page info failed")})
+
+
+@mcp.tool()
+def browser_execute_js(expression: str) -> str:
+    """Execute arbitrary JavaScript expression in active browser tab via CDP.
+
+    Args:
+        expression: The JavaScript code/expression to evaluate.
+
+    Returns:
+        JSON with execution result or error.
+    """
+    try:
+        from uacc.core.cdp_bridge import auto_connect
+        bridge = auto_connect()
+        if not bridge.connected:
+            return json.dumps({
+                "success": False,
+                "error": "No browser with remote debugging detected. Launch Chrome/Edge with --remote-debugging-port=9222",
+            })
+
+        val = bridge.evaluate_js(expression)
+        return json.dumps({
+            "success": True,
+            "result": val,
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Browser execute JS failed")})
+
+
+@mcp.tool()
+def browser_wait_for(
+    selector: str,
+    timeout_ms: int = 10000,
+) -> str:
+    """Poll until a CSS selector matches an element in active browser tab via CDP.
+
+    Args:
+        selector: CSS selector to wait for.
+        timeout_ms: Maximum wait time in milliseconds (default 10,000ms).
+
+    Returns:
+        JSON with found element or timeout error.
+    """
+    try:
+        from uacc.core.cdp_bridge import auto_connect
+        bridge = auto_connect()
+        if not bridge.connected:
+            return json.dumps({
+                "success": False,
+                "error": "No browser with remote debugging detected. Launch Chrome/Edge with --remote-debugging-port=9222",
+            })
+
+        el = bridge.wait_for_selector(selector, timeout_ms=timeout_ms)
+        if not el:
+            return json.dumps({
+                "success": False,
+                "error": f"Timeout ({timeout_ms}ms) waiting for CSS selector '{selector}'",
+            })
+
+        return json.dumps({
+            "success": True,
+            "selector": selector,
+            "element": el.to_dict(),
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Browser wait for failed")})
+
+
+@mcp.tool()
+def browser_click(selector: str) -> str:
+    """Click a DOM element in active browser tab by CSS selector via CDP.
+
+    Args:
+        selector: CSS selector of element to click.
+
+    Returns:
+        JSON with click success status.
+    """
+    try:
+        from uacc.core.cdp_bridge import auto_connect
+        bridge = auto_connect()
+        if not bridge.connected:
+            return json.dumps({
+                "success": False,
+                "error": "No browser with remote debugging detected. Launch Chrome/Edge with --remote-debugging-port=9222",
+            })
+
+        ok = bridge.click_element(selector)
+        return json.dumps({
+            "success": ok,
+            "selector": selector,
+            "message": f"Clicked '{selector}' via DOM" if ok else f"Element '{selector}' not found",
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Browser click failed")})
+
+
+@mcp.tool()
+def browser_type(
+    selector: str,
+    text: str,
+    clear_first: bool = False,
+) -> str:
+    """Type text into a DOM input/textarea element by CSS selector via CDP.
+
+    Args:
+        selector: CSS selector of target input field.
+        text: Text string to type.
+        clear_first: If True, clears existing input value before typing.
+
+    Returns:
+        JSON with typing success status.
+    """
+    try:
+        from uacc.core.cdp_bridge import auto_connect
+        bridge = auto_connect()
+        if not bridge.connected:
+            return json.dumps({
+                "success": False,
+                "error": "No browser with remote debugging detected. Launch Chrome/Edge with --remote-debugging-port=9222",
+            })
+
+        ok = bridge.type_in_element(selector, text, clear_first=clear_first)
+        return json.dumps({
+            "success": ok,
+            "selector": selector,
+            "text_typed": text,
+            "clear_first": clear_first,
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Browser type failed")})
+
+
+@mcp.tool()
+def browser_navigate(url: str) -> str:
+    """Navigate active browser tab to a URL via CDP.
+
+    Args:
+        url: Destination URL (e.g. "https://google.com").
+
+    Returns:
+        JSON with navigation status.
+    """
+    try:
+        from uacc.core.cdp_bridge import auto_connect
+        bridge = auto_connect()
+        if not bridge.connected:
+            return json.dumps({
+                "success": False,
+                "error": "No browser with remote debugging detected. Launch Chrome/Edge with --remote-debugging-port=9222",
+            })
+
+        res = bridge.navigate(url)
+        return json.dumps({
+            "success": True,
+            "url": url,
+            "result": res,
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Browser navigate failed")})
+
 
 
 _populate_tool_registry()

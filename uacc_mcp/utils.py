@@ -72,6 +72,7 @@ class SessionState:
         self.element_cache: Dict[str, CachedElement] = {}
         self.action_log: List[Dict[str, Any]] = []
         self.screen_size: Optional[Tuple[int, int]] = None
+        self.snapshots: Dict[str, Image] = {}  # Named screenshots for diff comparison
         self._start_time = time.time()
 
     def cache_elements(self, elements: List[Dict[str, Any]]) -> None:
