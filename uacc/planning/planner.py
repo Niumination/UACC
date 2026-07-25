@@ -529,10 +529,3 @@ def _extract_field_name(text: str) -> str:
     if field_match:
         return field_match.group(1)
     return ""
-<<<<<<< HEAD
-
-
-
-
-=======
->>>>>>> b7bf5aa (feat: implement UACC MCP server for system control and add memory management tools)

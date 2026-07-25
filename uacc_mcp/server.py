@@ -2813,11 +2813,7 @@ def smart_click(
             pass
 
         # Check if semantic graph knows a preferred strategy ordering for this app
-<<<<<<< HEAD
         strategy_order = ["accessibility", "ocr", "vlm", "vision"]
-=======
-        strategy_order = ["accessibility", "ocr", "vision"]
->>>>>>> b7bf5aa (feat: implement UACC MCP server for system control and add memory management tools)
         if current_app:
             try:
                 from uacc.memory.semantic_graph import SemanticGraph
@@ -2843,10 +2839,7 @@ def smart_click(
                     strategy_order = sorted(strategy_order, key=lambda s: -strategy_scores.get(s, 1.0))
             except Exception:
                 pass
-<<<<<<< HEAD
-=======
 
->>>>>>> b7bf5aa (feat: implement UACC MCP server for system control and add memory management tools)
         # Take "before" snapshot for verification
         before_img = None
         if verify:
@@ -2927,7 +2920,6 @@ def smart_click(
                 except Exception as e:
                     attempts.append({"strategy": "ocr", "error": str(e)})
 
-<<<<<<< HEAD
             elif strategy_name == "vlm":
                 try:
                     strat_start = time.time()
@@ -2959,8 +2951,6 @@ def smart_click(
                 except Exception as e:
                     attempts.append({"strategy": "vlm", "error": str(e)})
 
-=======
->>>>>>> b7bf5aa (feat: implement UACC MCP server for system control and add memory management tools)
             elif strategy_name == "vision":
                 try:
                     strat_start = time.time()
