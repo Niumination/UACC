@@ -17,6 +17,25 @@ load_dotenv(_PROJECT_ROOT / ".env")
 
 
 @dataclass
+class VLMConfig:
+    """Vision Language Model settings for screen understanding.
+
+    Falls back to LLMConfig keys when dedicated VLM keys are not set.
+    """
+
+    provider: str = field(default_factory=lambda: os.getenv("UACC_VLM_PROVIDER", "auto"))
+    openai_api_key: str = field(default_factory=lambda: os.getenv("UACC_VLM_OPENAI_API_KEY", ""))
+    openai_model: str = field(default_factory=lambda: os.getenv("UACC_VLM_OPENAI_MODEL", "gpt-4o"))
+    openai_base_url: str | None = field(default_factory=lambda: os.getenv("UACC_VLM_OPENAI_BASE_URL"))
+    anthropic_api_key: str = field(default_factory=lambda: os.getenv("UACC_VLM_ANTHROPIC_API_KEY", ""))
+    anthropic_model: str = field(
+        default_factory=lambda: os.getenv("UACC_VLM_ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+    )
+    local_model: str = field(default_factory=lambda: os.getenv("UACC_VLM_LOCAL_MODEL", ""))
+    local_base_url: str = field(default_factory=lambda: os.getenv("UACC_VLM_LOCAL_BASE_URL", "http://localhost:11434/v1"))
+
+
+@dataclass
 class LLMConfig:
     """LLM provider settings."""
 
@@ -85,6 +104,7 @@ class Config:
 
     llm: LLMConfig = field(default_factory=LLMConfig)
     uacc: UACCConfig = field(default_factory=UACCConfig)
+    vlm: VLMConfig = field(default_factory=VLMConfig)
     project_root: Path = _PROJECT_ROOT
 
 
