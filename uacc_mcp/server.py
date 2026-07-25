@@ -81,6 +81,15 @@ from uacc.core.window_manager import (
 
 from uacc import __version__ as uacc_version
 from uacc.actions.artistic_painter import ArtisticPainter
+from uacc.memory.tools import (
+    get_app_action_history as _get_app_action_history,
+    memory_summary as _memory_summary,
+    query_knowledge as _query_knowledge,
+    recall_related_apps as _recall_related_apps,
+    record_strategy_performance as _record_strategy,
+    remember_action as _remember_action,
+)
+from uacc.planning import GoalDecomposer
 from uacc.tasks import TaskManager, TaskStatus
 from uacc.tools import ToolRegistry, ToolDef
 from uacc.workflows import get_store, Workflow, WorkflowStep, workflow_step
@@ -1753,6 +1762,98 @@ def run_workflow(name: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
+#  CROSS-SESSION MEMORY TOOLS
+# ═══════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def remember_action(
+    app_name: str,
+    action_name: str,
+    element_label: str = "",
+    result: str = "success",
+    reasoning: str = "",
+) -> str:
+    """Record a successful action in the cross-session knowledge graph.
+
+    The graph persists across agent sessions under ``~/.uacc/semantic_graph.json``,
+    enabling UACC to remember UI patterns from previous runs.
+
+    Args:
+        app_name: Application the action was performed in (e.g. "Notepad", "Chrome").
+        action_name: The action performed (e.g. "click", "type", "hotkey").
+        element_label: Text label of the target UI element (e.g. "Save", "Close").
+        result: "success" or "failure".
+        reasoning: Why this action was performed (for future recall context).
+
+    Returns:
+        JSON summary of what was recorded.
+    """
+    return _remember_action(app_name, action_name, element_label, result, reasoning)
+
+
+@mcp.tool()
+def query_knowledge(app_name: str) -> str:
+    """Query what UACC knows about an application from past sessions.
+
+    Returns known UI patterns, elements, action types, and the last-seen
+    timestamp for the given application. Helps the agent understand what
+    to expect when interacting with a familiar app.
+
+    Args:
+        app_name: Application name to look up (e.g. "Notepad", "Chrome").
+
+    Returns:
+        JSON with known patterns, elements, and action history.
+    """
+    return _query_knowledge(app_name)
+
+
+@mcp.tool()
+def recall_related_apps(app_name: str) -> str:
+    """Find applications related to the given app via the knowledge graph.
+
+    Uses SIMILAR_TO relationships and shared UI element patterns
+    to discover related apps. Useful when the agent needs to apply
+    knowledge from one app to a similar one.
+
+    Args:
+        app_name: Application name to find related apps for.
+
+    Returns:
+        JSON with a list of related applications.
+    """
+    return _recall_related_apps(app_name)
+
+
+@mcp.tool()
+def memory_summary() -> str:
+    """Get statistics about the cross-session knowledge graph.
+
+    Shows how many apps, elements, and relationships UACC has
+    learned across all sessions.
+
+    Returns:
+        JSON with entity and relation counts.
+    """
+    return _memory_summary()
+
+
+@mcp.tool()
+def app_action_history(app_name: str, limit: int = 10) -> str:
+    """Get the action history and reasoning for a specific application.
+
+    Args:
+        app_name: Application name (e.g. "Notepad", "Chrome").
+        limit: Maximum number of history entries to return (default 10).
+
+    Returns:
+        JSON with recent actions, reasoning, and timestamps.
+    """
+    return _get_app_action_history(app_name, limit)
+
+
+# ═══════════════════════════════════════════════════════════════
 #  TOOL REGISTRY
 # ═══════════════════════════════════════════════════════════════
 
@@ -1781,6 +1882,13 @@ def _populate_tool_registry() -> None:
         "browser_query", "browser_get_page_info", "browser_execute_js",
         "browser_wait_for", "browser_click", "browser_type", "browser_navigate",
     ]
+    # Memory tools
+    supreme_tools = [
+        "remember_action", "query_knowledge", "recall_related_apps",
+        "memory_summary", "app_action_history",
+    ]
+    known_tools.extend(supreme_tools)
+
     for name in known_tools:
         fn = globals().get(name)
         if fn is None:
@@ -1943,75 +2051,33 @@ def uacc_planner(
     target_app: str = "",
     speed_mode: str = "fast",
 ) -> str:
-    """UACC Planner MC — Fast tool selector and strategy planner for UACC.
+    """UACC Planner — LLM-powered goal decomposition and tool sequencing.
 
-    Analyzes high-level user intent and determines the optimal, fastest tool
-    sequence across UACC's 25+ native capabilities.
+    Analyzes a natural language goal and produces a structured execution plan:
+    - Breaks the goal into atomic steps
+    - Assigns the optimal UACC tool to each step
+    - Includes verification checkpoints (in ``thorough`` mode)
+    - Uses the cross-session knowledge graph for app-specific context
+    - Falls back to heuristic decomposition when no LLM is configured
+
+    Call this MANDATORY tool BEFORE any UACC interaction sequence.
 
     Args:
-        task_description: The goal or action the agent wants to perform on screen.
-        target_app: Optional target application name (e.g. "paint", "browser", "notepad").
-        speed_mode: Planning mode: "fast" (direct execution path) or "thorough" (with UI verification steps).
+        task_description: The goal or action the agent wants to perform on screen (e.g. "Open Notepad and type Hello World", "Click the Save button in Chrome").
+        target_app: Optional target application name for context (e.g. "paint", "chrome", "notepad").
+        speed_mode: Planning mode — "fast" (direct execution, minimal verification) or "thorough" (with UI verification steps between every action).
 
     Returns:
-        JSON object containing selected tools, recommended parameters, execution plan, and estimated duration.
+        JSON object containing the decomposed plan with steps, tool params, reasoning, and estimated duration.
     """
     try:
-        desc_lower = task_description.lower()
-        target_lower = target_app.lower()
-
-        plan = {
-            "task": task_description,
-            "speed_mode": speed_mode,
-            "recommended_tools": [],
-            "steps": [],
-            "reasoning": "",
-            "estimated_duration_ms": 0,
-        }
-
-        # Drawing / Painting tasks
-        if any(w in desc_lower for w in ["draw", "paint", "sketch", "art", "scenery", "canvas"]):
-            plan["recommended_tools"] = ["launch_app", "paint_image", "screenshot"]
-            plan["steps"] = [
-                {"step": 1, "tool": "launch_app", "params": {"name_or_path": "mspaint"}},
-                {"step": 2, "tool": "paint_image", "params": {"image_path": "<path_to_image>", "max_strokes": 150}},
-                {"step": 3, "tool": "screenshot", "params": {}},
-            ]
-            plan["reasoning"] = "Fast computer-vision outline tracing via paint_image offers continuous pixel precision without static presets."
-            plan["estimated_duration_ms"] = 3500
-
-        # UI Navigation / Clicking
-        elif any(w in desc_lower for w in ["click", "button", "menu", "select", "press"]):
-            plan["recommended_tools"] = ["get_screen_info", "click_element", "click"]
-            plan["steps"] = [
-                {"step": 1, "tool": "get_screen_info", "params": {}},
-                {"step": 2, "tool": "click_element", "params": {"name": "<element_name>"}},
-            ]
-            plan["reasoning"] = "Text-map element finding allows single-step element targeting faster than raw vision."
-            plan["estimated_duration_ms"] = 300
-
-        # Application Launch & Typing
-        elif any(w in desc_lower for w in ["open", "launch", "type", "text", "write"]):
-            plan["recommended_tools"] = ["launch_app", "type_text"]
-            plan["steps"] = [
-                {"step": 1, "tool": "launch_app", "params": {"name_or_path": target_app or "notepad"}},
-                {"step": 2, "tool": "type_text", "params": {"text": "<text>"}},
-            ]
-            plan["reasoning"] = "Direct application launch followed by simulated keyboard input."
-            plan["estimated_duration_ms"] = 500
-
-        # Default multi-step computer control
-        else:
-            plan["recommended_tools"] = ["get_screen_info", "find_element", "execute_actions"]
-            plan["steps"] = [
-                {"step": 1, "tool": "get_screen_info", "params": {}},
-                {"step": 2, "tool": "execute_actions", "params": {"actions": []}},
-            ]
-            plan["reasoning"] = "General accessibility tree map inspection followed by batch action execution."
-            plan["estimated_duration_ms"] = 600
-
+        decomposer = GoalDecomposer()
+        plan = decomposer.decompose(
+            task_description=task_description,
+            target_app=target_app,
+            speed_mode=speed_mode,
+        )
         return json.dumps({"success": True, "plan": plan}, indent=2)
-
     except Exception as exc:
         return json.dumps({"success": False, "error": format_error(exc, "Planner failed")})
 
@@ -2571,20 +2637,61 @@ def smart_click(
         click_x, click_y = 0, 0
         method_used = ""
 
+        # Determine current app for adaptive strategy tracking
+        current_app = ""
+        try:
+            from uacc.core.window_manager import get_active_window as _get_win
+            win = _get_win()
+            if win:
+                current_app = win.process_name or win.title
+        except Exception:
+            pass
+
+        # Check if semantic graph knows a preferred strategy ordering for this app
+        strategy_order = ["accessibility", "ocr", "vision"]
+        if current_app:
+            try:
+                from uacc.memory.semantic_graph import SemanticGraph
+                sg = SemanticGraph()
+                patterns = sg.get_app_patterns(current_app)
+                if patterns:
+                    # Sort strategies by success weight descending
+                    strategy_scores = {s: 1.0 for s in strategy_order}
+                    for rel_type, elements in patterns.get("patterns", {}).items():
+                        if rel_type in ("opens", "selects"):
+                            for el in elements:
+                                # Check if we've recorded this element-strategy combo
+                                el_id = f"{current_app.lower().replace(' ', '_')}__strategy_"
+                                for s in strategy_order:
+                                    sid = el_id + s
+                                    sg_rels = sg.query(sid)
+                                    for r in sg_rels:
+                                        if r.properties.get("success"):
+                                            strategy_scores[s] = strategy_scores.get(s, 1.0) + r.weight * 0.5
+                                        elif r.properties.get("success") is False:
+                                            strategy_scores[s] = strategy_scores.get(s, 1.0) - r.weight * 0.3
+                    # Reorder by score descending (best first)
+                    strategy_order = sorted(strategy_order, key=lambda s: -strategy_scores.get(s, 1.0))
+            except Exception:
+                pass
+
         # Take "before" snapshot for verification
         before_img = None
         if verify:
             before_img = capture_full()
 
         for attempt in range(max_retries):
-            # Strategy 1: Accessibility tree
-            if attempt == 0:
+            strategy_name = strategy_order[attempt % len(strategy_order)]
+
+            if strategy_name == "accessibility":
                 try:
+                    strat_start = time.time()
                     find_result = click_element_by_name(
                         name=target,
                         element_type=element_type,
                         button=button,
                     )
+                    strat_duration = int((time.time() - strat_start) * 1000)
                     if find_result["success"]:
                         click_x = find_result["click_x"]
                         click_y = find_result["click_y"]
@@ -2598,14 +2705,18 @@ def smart_click(
                         exec_result = executor.execute(action)
                         if exec_result["success"]:
                             attempts.append({"strategy": "accessibility", "success": True})
+                            if current_app:
+                                _record_strategy(current_app, "accessibility", target, True, strat_duration)
                             break
                     attempts.append({"strategy": "accessibility", "success": False, "reason": find_result.get("message", "Not found")})
+                    if current_app:
+                        _record_strategy(current_app, "accessibility", target, False, strat_duration)
                 except Exception as e:
                     attempts.append({"strategy": "accessibility", "error": str(e)})
 
-            # Strategy 2: OCR text search
-            if attempt <= 1:
+            elif strategy_name == "ocr":
                 try:
+                    strat_start = time.time()
                     from uacc.core.ocr_engine import extract_text
                     img = capture_full()
                     ocr_results = extract_text(img)
@@ -2621,6 +2732,7 @@ def smart_click(
                                 best_score = score
                                 best_match = ocr
 
+                    strat_duration = int((time.time() - strat_start) * 1000)
                     if best_match:
                         click_x = (best_match.bounds[0] + best_match.bounds[2]) // 2
                         click_y = (best_match.bounds[1] + best_match.bounds[3]) // 2
@@ -2634,14 +2746,18 @@ def smart_click(
                         exec_result = executor.execute(action)
                         if exec_result["success"]:
                             attempts.append({"strategy": "ocr", "success": True, "matched_text": best_match.text})
+                            if current_app:
+                                _record_strategy(current_app, "ocr", target, True, strat_duration)
                             break
                     attempts.append({"strategy": "ocr", "success": False, "reason": "No OCR match found"})
+                    if current_app:
+                        _record_strategy(current_app, "ocr", target, False, strat_duration)
                 except Exception as e:
                     attempts.append({"strategy": "ocr", "error": str(e)})
 
-            # Strategy 3: Full vision detection
-            if attempt <= 2:
+            elif strategy_name == "vision":
                 try:
+                    strat_start = time.time()
                     from uacc.core.vision_detector import full_vision_detect
                     img = capture_full()
                     vision_elements = full_vision_detect(img)
@@ -2656,6 +2772,7 @@ def smart_click(
                                 best_score = score
                                 best_el = el
 
+                    strat_duration = int((time.time() - strat_start) * 1000)
                     if best_el:
                         click_x = best_el.center[0]
                         click_y = best_el.center[1]
@@ -2669,8 +2786,12 @@ def smart_click(
                         exec_result = executor.execute(action)
                         if exec_result["success"]:
                             attempts.append({"strategy": "vision", "success": True, "matched_text": best_el.text})
+                            if current_app:
+                                _record_strategy(current_app, "vision", target, True, strat_duration)
                             break
                     attempts.append({"strategy": "vision", "success": False, "reason": "No vision match found"})
+                    if current_app:
+                        _record_strategy(current_app, "vision", target, False, strat_duration)
                 except Exception as e:
                     attempts.append({"strategy": "vision", "error": str(e)})
 
