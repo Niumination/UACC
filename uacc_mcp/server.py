@@ -1878,6 +1878,8 @@ def _populate_tool_registry() -> None:
         "smart_click", "smart_type",
         "find_element_relative", "find_element_near",
         "get_system_info", "list_processes",
+        # VLM tools
+        "vlm_analyze", "vlm_locate_element",
         # Browser DOM Bridge (CDP)
         "browser_query", "browser_get_page_info", "browser_execute_js",
         "browser_wait_for", "browser_click", "browser_type", "browser_navigate",
@@ -2503,10 +2505,11 @@ def get_screen_info_enhanced(
     - "auto": Try accessibility tree first; if < 5 elements found, fall back to vision.
     - "accessibility": Use OS accessibility tree only (fastest, most reliable).
     - "vision": Use OCR + edge detection only (for games, canvas, remote desktop).
+    - "vlm": Use Vision Language Model for rich screen understanding (slow, API cost).
     - "hybrid": Merge accessibility tree AND vision results for maximum coverage.
 
     Args:
-        mode: Detection mode — "auto", "accessibility", "vision", or "hybrid".
+        mode: Detection mode — "auto", "accessibility", "vision", "vlm", or "hybrid".
         include_ocr: If True, also run OCR in accessibility mode (slower but more text).
 
     Returns:
@@ -2529,7 +2532,33 @@ def get_screen_info_enhanced(
             except Exception as exc:
                 logger.warning("Accessibility scan failed: %s", exc)
 
-        # Vision scan
+        # VLM scan
+        vlm_elements = []
+        if mode == "vlm":
+            try:
+                from uacc.core.vlm_engine import get_vlm_engine
+                engine = get_vlm_engine()
+                if engine.is_available():
+                    img = capture_full()
+                    vlm_raw = engine.detect_elements(img)
+                    from uacc.core.text_map import ScreenElement
+                    for i, ve in enumerate(vlm_raw):
+                        clickable = ve.element_type in ("button", "link", "tab", "menu_item", "checkbox", "radio", "icon", "dropdown", "combobox", "list_item")
+                        editable = ve.element_type in ("text_input", "input", "combobox", "slider")
+                        vlm_elements.append(ScreenElement(
+                            id=f"vlm_{i}", element_type=ve.element_type,
+                            text=ve.text, bounds=ve.bounds,
+                            center=ve.center, clickable=clickable,
+                            editable=editable, source="vlm",
+                        ))
+                    method_used = "vlm"
+                else:
+                    method_used = "vlm (not configured)"
+            except Exception as exc:
+                logger.warning("VLM scan failed: %s", exc)
+                method_used = "vlm (failed)"
+
+        # Vision scan (fallback for auto/hybrid, exclusive for vision mode)
         vision_elements = []
         if mode == "vision" or mode == "hybrid" or (mode == "auto" and len(a11y_elements) < 5):
             try:
@@ -2541,7 +2570,9 @@ def get_screen_info_enhanced(
                 logger.warning("Vision scan failed: %s", exc)
 
         # Merge results
-        if mode == "hybrid" or (mode == "auto" and vision_elements):
+        if mode == "vlm":
+            all_elements = vlm_elements
+        elif mode == "hybrid" or (mode == "auto" and vision_elements):
             # Deduplicate: if an a11y element overlaps a vision element, keep the a11y one
             a11y_bounds = set()
             for el in a11y_elements:
@@ -2595,6 +2626,139 @@ def get_screen_info_enhanced(
 
 
 # ═══════════════════════════════════════════════════════════════
+#  VISION-LANGUAGE MODEL TOOLS
+# ═══════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def vlm_analyze(
+    context: str = "",
+    save_path: str | None = None,
+) -> str:
+    """Analyse the current screen using a Vision Language Model.
+
+    Provides rich, structured understanding of the screen layout, visible
+    applications, interactive elements, dialogs, and text content. Uses the
+    configured VLM provider (OpenAI Vision, Anthropic Claude, or local).
+
+    VLM analysis is SLOW (~1-3 s) and may cost API credits — use sparingly.
+    Prefer ``get_screen_info`` or ``detect_elements_visual`` for routine tasks.
+
+    Args:
+        context: Optional task context string to help the VLM focus its analysis.
+        save_path: Optional path to save the analysed screenshot.
+
+    Returns:
+        JSON with layout description, detected app, interactive elements, and text content.
+    """
+    try:
+        from uacc.core.vlm_engine import get_vlm_engine
+
+        engine = get_vlm_engine()
+        if not engine.is_available():
+            return json.dumps({
+                "success": False,
+                "error": "No VLM provider configured. Set UACC_VLM_* env vars or LLM API keys.",
+            })
+
+        img = capture_full()
+
+        if save_path:
+            import os
+            dir_name = os.path.dirname(os.path.abspath(save_path))
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+            img.save(save_path)
+
+        analysis = engine.analyze_screenshot(img, context=context)
+        if analysis is None:
+            return json.dumps({"success": False, "error": "VLM analysis returned no result"})
+
+        session = get_session()
+        session.log_action("vlm_analyze", {"context": context}, {"success": True})
+
+        return json.dumps({
+            "success": True,
+            "provider": engine._provider.value if hasattr(engine, '_provider') else "unknown",
+            "model": engine._model if hasattr(engine, '_model') else "",
+            "summary": analysis.summary,
+            "layout": analysis.layout_description,
+            "detected_app": analysis.detected_app,
+            "interactive_count": analysis.interactive_count,
+            "detected_text": analysis.detected_text,
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "VLM analysis failed")})
+
+
+@mcp.tool()
+def vlm_locate_element(
+    target: str,
+) -> str:
+    """Locate a specific UI element on screen using a Vision Language Model.
+
+    Use this when standard element detection methods fail — the VLM can
+    understand natural-language descriptions of elements and find them
+    visually, even when they lack accessibility labels or rendered text.
+
+    VLM location is SLOW (~1-3 s) and may cost API credits — use sparingly.
+    Prefer ``find_element`` or ``smart_click`` for routine element location.
+
+    Args:
+        target: Natural language description of the element to find
+                (e.g. "the red Submit button", "search input field", "profile icon").
+
+    Returns:
+        JSON with found status, element type, confidence, and screen coordinates.
+    """
+    try:
+        from uacc.core.vlm_engine import get_vlm_engine
+
+        engine = get_vlm_engine()
+        if not engine.is_available():
+            return json.dumps({
+                "success": False,
+                "error": "No VLM provider configured. Set UACC_VLM_* env vars or LLM API keys.",
+            })
+
+        img = capture_full()
+        element = engine.locate_element(img, target)
+
+        session = get_session()
+        session.log_action("vlm_locate_element", {"target": target}, {
+            "success": element is not None,
+        })
+
+        if element is None:
+            return json.dumps({
+                "success": True,
+                "found": False,
+                "target": target,
+                "reason": "Element not visible on screen or could not be located",
+            })
+
+        return json.dumps({
+            "success": True,
+            "found": True,
+            "target": target,
+            "element_type": element.element_type,
+            "confidence": element.confidence,
+            "center": {"x": element.center[0], "y": element.center[1]},
+            "bounds": {
+                "left": element.bounds[0],
+                "top": element.bounds[1],
+                "right": element.bounds[2],
+                "bottom": element.bounds[3],
+            },
+            "tip": "Use click(x, y) with the center coordinates to interact.",
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "VLM locate element failed")})
+
+
+# ═══════════════════════════════════════════════════════════════
 #  SELF-HEALING SMART ACTIONS
 # ═══════════════════════════════════════════════════════════════
 
@@ -2605,16 +2769,17 @@ def smart_click(
     element_type: str | None = None,
     button: str = "left",
     verify: bool = True,
-    max_retries: int = 3,
+    max_retries: int = 4,
     reasoning: str = "",
 ) -> str:
     """Self-healing click — finds an element using multiple strategies and auto-retries.
 
-    Fallback chain:
+    Fallback chain (adaptive per-app):
     1. Accessibility tree fuzzy match (fastest, most reliable)
     2. OCR text search (catches rendered text that a11y misses)
-    3. Vision contour + OCR detection (for custom UI / games)
-    4. Returns failure with diagnostic info
+    3. VLM visual search (understands layout, icons, spatial relationships)
+    4. Vision contour + OCR detection (for custom UI / games)
+    5. Returns failure with diagnostic info
 
     If verify=True, captures before/after screenshots to confirm the click
     had an observable effect on the screen.
@@ -2624,7 +2789,7 @@ def smart_click(
         element_type: Optional type filter (button, menu_item, text_input, etc.).
         button: Mouse button — "left", "right", or "middle".
         verify: If True, verify the click changed the screen state.
-        max_retries: Maximum retry attempts across strategies (default 3).
+        max_retries: Maximum retry attempts across strategies (default 4).
         reasoning: Why you're clicking (for logging).
 
     Returns:
@@ -2648,7 +2813,7 @@ def smart_click(
             pass
 
         # Check if semantic graph knows a preferred strategy ordering for this app
-        strategy_order = ["accessibility", "ocr", "vision"]
+        strategy_order = ["accessibility", "ocr", "vlm", "vision"]
         if current_app:
             try:
                 from uacc.memory.semantic_graph import SemanticGraph
@@ -2754,6 +2919,37 @@ def smart_click(
                         _record_strategy(current_app, "ocr", target, False, strat_duration)
                 except Exception as e:
                     attempts.append({"strategy": "ocr", "error": str(e)})
+
+            elif strategy_name == "vlm":
+                try:
+                    strat_start = time.time()
+                    from uacc.core.vlm_engine import get_vlm_engine
+                    vlm = get_vlm_engine()
+                    img = capture_full()
+                    vlm_element = vlm.locate_element(img, target)
+
+                    strat_duration = int((time.time() - strat_start) * 1000)
+                    if vlm_element:
+                        click_x = vlm_element.center[0]
+                        click_y = vlm_element.center[1]
+                        method_used = "vlm"
+
+                        action = ClickAction(
+                            x=click_x, y=click_y,
+                            button=MouseButton(button), count=1,
+                            reasoning=reasoning or f"Smart click (VLM) '{target}'",
+                        )
+                        exec_result = executor.execute(action)
+                        if exec_result["success"]:
+                            attempts.append({"strategy": "vlm", "success": True, "matched_text": vlm_element.text})
+                            if current_app:
+                                _record_strategy(current_app, "vlm", target, True, strat_duration)
+                            break
+                    attempts.append({"strategy": "vlm", "success": False, "reason": "No VLM match found"})
+                    if current_app:
+                        _record_strategy(current_app, "vlm", target, False, strat_duration)
+                except Exception as e:
+                    attempts.append({"strategy": "vlm", "error": str(e)})
 
             elif strategy_name == "vision":
                 try:

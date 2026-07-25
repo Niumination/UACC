@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Tuple
 
 import numpy as np
 from PIL import Image
 
-from uacc.core.ocr_engine import OCRResult, extract_text
+from uacc.core.ocr_engine import extract_text
 from uacc.core.text_map import ScreenElement
 
 logger = logging.getLogger(__name__)
@@ -242,17 +242,28 @@ def ocr_only_detect(image: Image.Image) -> List[ScreenElement]:
     return elements
 
 
-def full_vision_detect(image: Image.Image) -> List[ScreenElement]:
-    """Full OmniParser-style pipeline: OCR + region detection → merged elements.
+def full_vision_detect(image: Image.Image, use_vlm: bool = True) -> List[ScreenElement]:
+    """Full OmniParser-style pipeline: VLM → OCR + region detection → merged elements.
 
-    Priority order:
-      1. Regions detected by contour analysis (typed as button/input/label)
+    Priority order when VLM is available:
+      1. VLM detection (vision-language model — understands layout, icons, spatial relations)
+      2. Regions detected by contour analysis (typed as button/input/label)
+      3. OCR text detections
+
+    Priority order without VLM (fallback):
+      1. Regions detected by contour analysis
       2. OCR text detections
-      3. Merge: OCR text is associated with nearby regions
 
-    Returns a list of ScreenElements with source="vision".
+    Returns a list of ScreenElements with source="vision" or "vlm".
     """
     elements: List[ScreenElement] = []
+
+    # Try VLM first (richest understanding, when configured)
+    if use_vlm:
+        vlm_elements = vlm_detect(image)
+        if vlm_elements:
+            logger.info("Vision detect: VLM returned %d elements — skipping OCR+CV fallback", len(vlm_elements))
+            return vlm_elements
 
     # Step 1: OCR
     try:
@@ -320,6 +331,46 @@ def full_vision_detect(image: Image.Image) -> List[ScreenElement]:
         "Vision detected: %d regions, %d OCR texts (%d unmatched)",
         len(regions), len(ocr_results), unmatched,
     )
+    return elements
+
+
+def vlm_detect(image: Image.Image) -> List[ScreenElement]:
+    """Detect UI elements using a Vision Language Model.
+
+    Calls the configured VLM (OpenAI Vision / Anthropic / local) to identify
+    all visible UI elements with their types and approximate bounding boxes.
+
+    Falls back gracefully to empty list if no VLM is configured or the call fails.
+    """
+    from uacc.core.vlm_engine import get_vlm_engine
+
+    engine = get_vlm_engine()
+    if not engine.is_available():
+        return []
+
+    try:
+        vlm_elements = engine.detect_elements(image)
+    except Exception as exc:
+        logger.warning("VLM detection failed: %s", exc)
+        return []
+
+    elements: List[ScreenElement] = []
+    for i, ve in enumerate(vlm_elements):
+        clickable = ve.element_type in ("button", "link", "tab", "menu_item", "checkbox", "radio", "icon", "dropdown", "combobox", "list_item")
+        editable = ve.element_type in ("text_input", "input", "combobox", "slider")
+
+        elements.append(ScreenElement(
+            id=f"vlm_{i}",
+            element_type=ve.element_type,
+            text=ve.text,
+            bounds=ve.bounds,
+            center=ve.center,
+            clickable=clickable,
+            editable=editable,
+            source="vlm",
+        ))
+
+    logger.info("VLM detected %d elements", len(elements))
     return elements
 
 

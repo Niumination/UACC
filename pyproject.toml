@@ -65,6 +65,10 @@ dev = [
     "pytest-cov>=4.0",
     "ruff>=0.1",
 ]
+vlm = [
+    "openai>=1.0",
+    "anthropic>=0.30",
+]
 
 [project.scripts]
 uacc = "uacc_mcp.server:main"
