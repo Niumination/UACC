@@ -5,6 +5,19 @@ All notable changes to UACC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] — 2026-07-25
+
+### 🚀 Supreme Release — 55 Native MCP Tools
+
+- **Browser DOM Bridge (CDP)** — 7 new tools (`browser_query`, `browser_get_page_info`, `browser_execute_js`, `browser_wait_for`, `browser_click`, `browser_type`, `browser_navigate`) connecting to Chrome/Edge via WebSocket for DOM-level CSS selector targeting.
+- **Cross-Platform Native Drivers** — Unified platform driver layer (`uacc/core/platform`) for Windows (`pywinauto`), macOS (`AppleScript`), and Linux (`xdotool` / `wmctrl`).
+- **Screen Diff & Action Verification** — 4 new tools (`take_snapshot`, `compare_snapshots`, `get_screen_diff`, `verify_action`) with pixel + semantic screen comparison and visual overlay highlighting.
+- **Vision Detector & Enhanced Analysis** — 2 new tools (`detect_elements_visual`, `get_screen_info_enhanced`) combining OCR and contour analysis for games, canvas, and remote desktop UIs.
+- **Self-Healing Smart Actions** — 2 new tools (`smart_click`, `smart_type`) with automatic 3-strategy fallback chains (a11y → OCR → vision) and click verification.
+- **Spatial Query Engine** — 2 new tools (`find_element_relative`, `find_element_near`) for relative spatial targeting ("button below Email label").
+- **System Inspection** — 2 new tools (`get_system_info`, `list_processes`) for CPU, RAM, disk, display, and process monitoring.
+- **Open-Source Repository Standards** — Complete GitHub community setup: YAML issue forms, PR template, CodeQL scanning workflow, Dependabot configuration, Funding, AI usage guidelines, and model licenses.
+
 ## [1.0.0] — 2026-07-21
 
 ### Added

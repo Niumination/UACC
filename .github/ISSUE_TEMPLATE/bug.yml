@@ -1,0 +1,83 @@
+name: 🐛 Bug Report
+description: Create a report to help us reproduce and fix a bug in UACC
+title: "[BUG]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report an issue! Please fill out the form below to help us reproduce and fix the bug quickly.
+
+  - type: input
+    id: version
+    attributes:
+      label: UACC Version
+      description: What version of UACC are you running? (e.g. 1.0.0 or git main)
+      placeholder: e.g. 1.0.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      description: What OS are you running UACC on?
+      options:
+        - Windows 10 / 11
+        - macOS
+        - Linux (X11)
+        - Linux (Wayland)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mcp_client
+    attributes:
+      label: MCP Host / Client
+      description: Which AI agent or client are you using UACC with?
+      options:
+        - Claude Code / Claude Desktop
+        - Hermes
+        - Cursor / Cline
+        - OpenCode / OpenClaw
+        - Custom Python Client
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: bug_description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps_to_reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Start UACC MCP server via `uacc-mcp`
+        2. Call tool `smart_click` with params ...
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected Behavior
+      description: A clear and concise description of what you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error Logs / Traceback
+      description: Please copy and paste any relevant terminal output or log tracebacks here.
+      render: shell
+    validations:
+      required: false

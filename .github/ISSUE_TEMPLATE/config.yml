@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 GitHub Discussions
+    url: https://github.com/uacc-project/uacc/discussions
+    about: Ask questions, share workflows, and discuss UACC ideas with the community.
+  - name: 📖 Documentation
+    url: https://github.com/uacc-project/uacc#readme
+    about: Read the official UACC documentation and MCP tool guide.

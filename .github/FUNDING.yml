@@ -1,0 +1,4 @@
+# GitHub Funding Configuration for UACC
+
+github: [uacc-project]
+custom: ["https://github.com/sponsors/uacc-project"]

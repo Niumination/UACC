@@ -8,7 +8,8 @@ UACC directly controls your **mouse and keyboard**. This is by design — it's h
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | ✅ Yes             |
+| 1.x.x   | ✅ Yes             |
+| 0.x.x   | ⚠️ Security fixes  |
 
 ## Built-in Safety Features
 

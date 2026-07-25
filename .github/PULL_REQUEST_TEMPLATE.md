@@ -1,35 +1,24 @@
-## Description
+## 📝 What changed?
 
-Brief description of the changes in this PR.
+- Brief description of the changes introduced in this PR.
 
-## Type of Change
+## ❓ Why?
 
-- [ ] 🐛 Bug fix (non-breaking change that fixes an issue)
-- [ ] ✨ New feature (non-breaking change that adds functionality)
-- [ ] 💥 Breaking change (fix or feature that would cause existing functionality to change)
-- [ ] 📝 Documentation update
-- [ ] 🧪 Test update
-- [ ] ♻️ Refactor (no functional changes)
+- Rationale behind the change and issue link (e.g. fixes #123).
 
-## Changes Made
+## 🧪 Testing & Verification
 
-- 
-- 
-- 
+- [ ] Added or updated unit tests (`pytest`)
+- [ ] Verified local MCP server startup (`python -m uacc --help`)
+- [ ] Tested with an MCP host / agent client (e.g. Claude Code, Cursor, Hermes)
 
-## Testing
+## 📷 Screenshots / Evidence (if applicable)
 
-- [ ] I have added tests that prove my fix/feature works
-- [ ] All existing tests pass (`python -m pytest tests/ -v`)
-- [ ] I have run the linter (`ruff check .`)
+- Attach any screenshots, screen diffs, or terminal logs.
 
-## Screenshots / Demos
+## 📋 Checklist
 
-If applicable, add screenshots or GIFs demonstrating the change.
-
-## Checklist
-
-- [ ] My code follows the project's code style
-- [ ] I have updated documentation as needed
-- [ ] I have added/updated type hints where applicable
-- [ ] I have updated the CHANGELOG.md (if applicable)
+- [ ] My code follows the project's style guidelines (`ruff check .`)
+- [ ] I have performed a self-review of my code
+- [ ] I have added docstrings and updated documentation where necessary
+- [ ] All tests pass cleanly (`pytest`)
