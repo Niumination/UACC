@@ -37,6 +37,7 @@ import json
 import logging
 import sys
 import threading
+import time
 
 from mcp.server.fastmcp import FastMCP
 import mcp.types as t
@@ -384,12 +385,18 @@ def click(
             result,
         )
 
+        # Post-action verification: capture current active window
+        from uacc.core.window_manager import get_active_window as _get_act_win
+        act_win = _get_act_win()
+        verified_active_window = act_win.title if act_win else ""
+
         return json.dumps({
             "success": result["success"],
             "message": result["message"],
             "coordinates": {"x": x, "y": y},
             "button": button,
             "count": count,
+            "verified_active_window": verified_active_window,
         })
 
     except Exception as exc:
@@ -591,11 +598,17 @@ def drag(
             result,
         )
 
+        # Post-action verification: capture current active window
+        from uacc.core.window_manager import get_active_window as _get_act_win
+        act_win = _get_act_win()
+        verified_active_window = act_win.title if act_win else ""
+
         return json.dumps({
             "success": result["success"],
             "message": result["message"],
             "start": {"x": start_x, "y": start_y},
             "end": {"x": end_x, "y": end_y},
+            "verified_active_window": verified_active_window,
         })
 
     except Exception as exc:
@@ -1232,18 +1245,22 @@ def paint_preset(preset_name: str) -> str:
     preset designs using vector brush strokes.
 
     Args:
-        preset_name: The design to draw ("rose", "galaxy", "mountains", "peacock").
+        preset_name: The design to draw ("rose", "galaxy", "mountains", "house", "peacock").
 
     Returns:
         JSON with success status and drawing stroke details.
     """
     try:
-        # 1. Launch Paint
-        _launch_app("mspaint", wait_ms=2000)
+        # 1. Launch / focus Paint and maximize
+        _launch_app("mspaint", wait_ms=1000)
+        from uacc.core.window_manager import minimize_maximize_window
+        minimize_maximize_window("Paint", "maximize")
+        time.sleep(0.5)
 
-        # 2. Get screen dimensions to find canvas center
+        # 2. Get screen dimensions to find canvas center inside white drawing area
         screen_w, screen_h = get_screen_size()
-        cx, cy = screen_w // 2, screen_h // 2 + 80  # Off-center to fit toolbar
+        cx = screen_w // 2
+        cy = max(300, int(screen_h * 0.55))  # Shifted down to clear top ribbon
 
         # 3. Instantiate painter and draw
         painter = ArtisticPainter()
@@ -1259,7 +1276,7 @@ def paint_preset(preset_name: str) -> str:
 
 
 @mcp.tool()
-def paint_image(image_path: str, max_strokes: int = 150) -> str:
+def paint_image(image_path: str, max_strokes: int = 500) -> str:
     """Sketch the outline of an image file on screen inside MS Paint.
 
     Launches Paint, loads the image from disk, extracts its outline
@@ -1268,23 +1285,47 @@ def paint_image(image_path: str, max_strokes: int = 150) -> str:
 
     Args:
         image_path: Absolute path to the source image file to sketch.
-        max_strokes: Maximum brush strokes to draw (default 150).
+        max_strokes: Maximum brush strokes to draw (default 500).
 
     Returns:
         JSON with success status and drawing stroke details.
     """
     try:
-        # 1. Launch Paint
-        _launch_app("mspaint", wait_ms=2000)
+        # 1. Launch / focus Paint and maximize window
+        _launch_app("mspaint", wait_ms=1000)
+        from uacc.core.window_manager import minimize_maximize_window
+        minimize_maximize_window("Paint", "maximize")
+        time.sleep(0.5)
 
-        # 2. Determine canvas coordinates
-        screen_w, screen_h = get_screen_size()
-        
-        # Approximate canvas bounds in Paint: main workspace
-        canvas_bounds = (10, 150, screen_w - 200, screen_h - 100)
+        # 2. Determine canvas coordinates safely inside Paint window bounds
+        from uacc.core.window_manager import list_windows
+        paint_win = None
+        for w in list_windows():
+            if "paint" in w.title.lower():
+                paint_win = w
+                break
 
-        # 3. Paint image outlines
-        painter = ArtisticPainter()
+        if paint_win and paint_win.bounds:
+            l, t, r, b = paint_win.bounds
+            win_w, win_h = max(100, r - l), max(100, b - t)
+            left = l + max(140, int(win_w * 0.08))
+            top = t + max(240, int(win_h * 0.24))
+            right = l + min(win_w - 80, int(win_w * 0.94))
+            bottom = t + min(win_h - 80, int(win_h * 0.90))
+        else:
+            screen_w, screen_h = get_screen_size()
+            left = max(140, int(screen_w * 0.08))
+            top = max(240, int(screen_h * 0.24))
+            right = min(screen_w - 80, int(screen_w * 0.94))
+            bottom = min(screen_h - 80, int(screen_h * 0.90))
+
+        canvas_bounds = (left, top, right, bottom)
+
+        # 3. Paint image outlines with optimized execution
+        import importlib
+        import uacc.actions.artistic_painter
+        importlib.reload(uacc.actions.artistic_painter)
+        painter = uacc.actions.artistic_painter.ArtisticPainter()
         result = painter.draw_image(image_path, canvas_bounds, max_strokes=max_strokes)
 
         session = get_session()
@@ -1885,6 +1926,85 @@ def list_tasks(status_filter: str = "") -> str:
         return json.dumps({"success": True, "tasks": tasks, "count": len(tasks)})
     except Exception as exc:
         return json.dumps({"success": False, "error": format_error(exc, "List tasks failed")})
+
+
+@mcp.tool()
+def uacc_planner(
+    task_description: str,
+    target_app: str = "",
+    speed_mode: str = "fast",
+) -> str:
+    """UACC Planner MC — Fast tool selector and strategy planner for UACC.
+
+    Analyzes high-level user intent and determines the optimal, fastest tool
+    sequence across UACC's 25+ native capabilities.
+
+    Args:
+        task_description: The goal or action the agent wants to perform on screen.
+        target_app: Optional target application name (e.g. "paint", "browser", "notepad").
+        speed_mode: Planning mode: "fast" (direct execution path) or "thorough" (with UI verification steps).
+
+    Returns:
+        JSON object containing selected tools, recommended parameters, execution plan, and estimated duration.
+    """
+    try:
+        desc_lower = task_description.lower()
+        target_lower = target_app.lower()
+
+        plan = {
+            "task": task_description,
+            "speed_mode": speed_mode,
+            "recommended_tools": [],
+            "steps": [],
+            "reasoning": "",
+            "estimated_duration_ms": 0,
+        }
+
+        # Drawing / Painting tasks
+        if any(w in desc_lower for w in ["draw", "paint", "sketch", "art", "scenery", "canvas"]):
+            plan["recommended_tools"] = ["launch_app", "paint_image", "screenshot"]
+            plan["steps"] = [
+                {"step": 1, "tool": "launch_app", "params": {"name_or_path": "mspaint"}},
+                {"step": 2, "tool": "paint_image", "params": {"image_path": "<path_to_image>", "max_strokes": 150}},
+                {"step": 3, "tool": "screenshot", "params": {}},
+            ]
+            plan["reasoning"] = "Fast computer-vision outline tracing via paint_image offers continuous pixel precision without static presets."
+            plan["estimated_duration_ms"] = 3500
+
+        # UI Navigation / Clicking
+        elif any(w in desc_lower for w in ["click", "button", "menu", "select", "press"]):
+            plan["recommended_tools"] = ["get_screen_info", "click_element", "click"]
+            plan["steps"] = [
+                {"step": 1, "tool": "get_screen_info", "params": {}},
+                {"step": 2, "tool": "click_element", "params": {"name": "<element_name>"}},
+            ]
+            plan["reasoning"] = "Text-map element finding allows single-step element targeting faster than raw vision."
+            plan["estimated_duration_ms"] = 300
+
+        # Application Launch & Typing
+        elif any(w in desc_lower for w in ["open", "launch", "type", "text", "write"]):
+            plan["recommended_tools"] = ["launch_app", "type_text"]
+            plan["steps"] = [
+                {"step": 1, "tool": "launch_app", "params": {"name_or_path": target_app or "notepad"}},
+                {"step": 2, "tool": "type_text", "params": {"text": "<text>"}},
+            ]
+            plan["reasoning"] = "Direct application launch followed by simulated keyboard input."
+            plan["estimated_duration_ms"] = 500
+
+        # Default multi-step computer control
+        else:
+            plan["recommended_tools"] = ["get_screen_info", "find_element", "execute_actions"]
+            plan["steps"] = [
+                {"step": 1, "tool": "get_screen_info", "params": {}},
+                {"step": 2, "tool": "execute_actions", "params": {"actions": []}},
+            ]
+            plan["reasoning"] = "General accessibility tree map inspection followed by batch action execution."
+            plan["estimated_duration_ms"] = 600
+
+        return json.dumps({"success": True, "plan": plan}, indent=2)
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "Planner failed")})
 
 
 _populate_tool_registry()

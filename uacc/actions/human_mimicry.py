@@ -210,3 +210,22 @@ class HumanMimicryEngine:
         }
         self.current_profile = current_profile
 
+
+def click_human(
+    target: Tuple[int, int],
+    button: str = "left",
+    clicks: int = 1,
+    duration_ms: int = 200,
+) -> None:
+    """Perform a human-like click operation.
+
+    Smoothly moves the cursor along a Bézier curve to the target position,
+    pauses naturally, and executes physical mouse clicks.
+    """
+    current = pyautogui.position()
+    move_mouse_human(current, target, duration_ms=duration_ms, jitter=2)
+    time.sleep(random.uniform(0.04, 0.08))
+    pyautogui.click(x=target[0], y=target[1], clicks=clicks, button=button)
+    time.sleep(random.uniform(0.05, 0.1))
+
+

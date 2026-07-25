@@ -77,17 +77,25 @@ class ActionExecutor:
         if elapsed < self.action_delay_ms:
             time.sleep((self.action_delay_ms - elapsed) / 1000)
 
-        try:
-            result = self._dispatch(action)
-            self._last_action_time = time.time()
-            return result
-        except Exception as exc:
-            logger.error("Action execution failed: %s", exc)
-            return {
-                "success": False,
-                "message": f"Execution error: {exc}",
-                "action": getattr(action, "action", "unknown"),
-            }
+        # Robust execution retry loop (3x with backoff)
+        max_retries = 3
+        last_exception = None
+
+        for attempt in range(1, max_retries + 1):
+            try:
+                result = self._dispatch(action)
+                self._last_action_time = time.time()
+                return result
+            except Exception as exc:
+                last_exception = exc
+                logger.warning("Action attempt %d/%d failed: %s", attempt, max_retries, exc)
+                time.sleep(0.05 * attempt)
+
+        return {
+            "success": False,
+            "message": f"Execution error after {max_retries} attempts: {last_exception}",
+            "action": getattr(action, "action", "unknown"),
+        }
 
     def _dispatch(self, action: Action) -> dict:
         """Route to the appropriate handler."""

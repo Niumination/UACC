@@ -801,7 +801,46 @@ def launch_application(
             "spotify": "spotify.exe",
             "discord": "discord.exe",
         }
+        TITLE_MATCHERS = {
+            "mspaint": ["paint"],
+            "mspaint.exe": ["paint"],
+            "paint": ["paint"],
+            "calc": ["calculator", "calc"],
+            "calc.exe": ["calculator", "calc"],
+            "calculator": ["calculator", "calc"],
+            "notepad": ["notepad"],
+            "notepad.exe": ["notepad"],
+            "code": ["visual studio code", "code"],
+            "code.exe": ["visual studio code", "code"],
+            "vscode": ["visual studio code", "code"],
+            "cmd": ["command prompt", "cmd"],
+            "cmd.exe": ["command prompt", "cmd"],
+            "powershell": ["powershell"],
+            "powershell.exe": ["powershell"],
+            "terminal": ["terminal"],
+            "wt.exe": ["terminal"],
+            "winword": ["word"],
+            "winword.exe": ["word"],
+            "word": ["word"],
+            "excel": ["excel"],
+            "excel.exe": ["excel"],
+        }
         try:
+            # Check if window is already open
+            from uacc.core.window_manager import focus_window
+            terms = TITLE_MATCHERS.get(name_or_path.lower(), [name_or_path])
+            if name_or_path.lower() not in terms:
+                terms.append(name_or_path.lower())
+            for term in terms:
+                focused = focus_window(term)
+                if focused.get("success"):
+                    time.sleep(0.3)
+                    return {
+                        "success": True,
+                        "message": f"Focused existing window for '{name_or_path}'",
+                        "already_running": True,
+                    }
+
             executable = APP_ALIASES.get(name_or_path.lower(), name_or_path)
             cmd_parts = [executable]
             if arguments:

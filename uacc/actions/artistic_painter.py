@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageFilter, ImageOps
 
-from uacc.actions.schema import DragAction, MouseButton
+from uacc.actions.schema import ClickAction, DragAction, MouseButton
 from uacc.actions.executor import ActionExecutor
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,8 @@ class ArtisticPainter:
             strokes = self._generate_galaxy(cx, cy)
         elif preset_name == "mountains":
             strokes = self._generate_mountains(cx, cy)
+        elif preset_name == "house":
+            strokes = self._generate_house(cx, cy)
         elif preset_name == "peacock":
             return self._draw_peacock_direct(cx, cy)
         else:
@@ -68,22 +70,25 @@ class ArtisticPainter:
         except Exception as exc:
             return {"success": False, "message": f"Failed to load image: {exc}"}
 
-        # Step 1: Image Processing (Resize to fit canvas and extract edges)
-        canvas_w = canvas_bounds[2] - canvas_bounds[0]
-        canvas_h = canvas_bounds[3] - canvas_bounds[1]
+        # Step 1: Image Processing (Assess space, fit within canvas bounds with margin)
+        canvas_w = max(100, canvas_bounds[2] - canvas_bounds[0])
+        canvas_h = max(100, canvas_bounds[3] - canvas_bounds[1])
 
-        # Preserve aspect ratio
-        img.thumbnail((canvas_w - 40, canvas_h - 40))
+        # Preserve aspect ratio with protective canvas margin
+        margin = 40
+        max_target_w = max(50, canvas_w - margin * 2)
+        max_target_h = max(50, canvas_h - margin * 2)
+        img.thumbnail((max_target_w, max_target_h))
         img_w, img_h = img.size
 
-        # Offset to center within the canvas
+        # Assess starting offset to center artwork strictly within available canvas space
         offset_x = canvas_bounds[0] + (canvas_w - img_w) // 2
         offset_y = canvas_bounds[1] + (canvas_h - img_h) // 2
 
         # Grayscale + find edges
         gray = ImageOps.grayscale(img)
         edges = gray.filter(ImageFilter.FIND_EDGES)
-        
+
         # Binary thresholding
         binary_edges = edges.point(lambda p: 255 if p > edge_threshold else 0)
         width, height = binary_edges.size
@@ -91,7 +96,7 @@ class ArtisticPainter:
 
         # Step 2: Path Tracing (Contiguous DFS tracking of edge pixels)
         visited = set()
-        strokes = []
+        raw_paths = []
 
         def get_neighbors(x, y):
             neighbors = []
@@ -105,16 +110,14 @@ class ArtisticPainter:
             return neighbors
 
         # Traverse and find contiguous lines
-        for y in range(0, height, 2):  # Step 2 to downsample slightly
+        for y in range(0, height, 2):
             for x in range(0, width, 2):
                 if pixels[x, y] == 255 and (x, y) not in visited:
-                    # Start a new stroke path
                     path = []
                     curr_x, curr_y = x, y
                     path.append((curr_x, curr_y))
                     visited.add((curr_x, curr_y))
 
-                    # Follow the line
                     while True:
                         next_pixel = None
                         for nx, ny in get_neighbors(curr_x, curr_y):
@@ -125,23 +128,66 @@ class ArtisticPainter:
                             curr_x, curr_y = next_pixel
                             path.append((curr_x, curr_y))
                             visited.add((curr_x, curr_y))
-                            if len(path) > 30:  # Cap single path length to avoid huge vectors
+                            if len(path) >= 200:  # Allow continuous long strokes
                                 break
                         else:
                             break
 
-                    if len(path) > 3:  # Filter out short noise dots
-                        strokes.append(path)
+                    if len(path) >= 4:  # Filter noise dots
+                        raw_paths.append(path)
 
-        # Cap the total strokes
-        strokes = strokes[:max_strokes]
-        logger.info("Generated %d outline paths from image", len(strokes))
+        if not raw_paths:
+            return {"success": False, "message": "No outline paths extracted from image."}
 
-        # Step 3: Convert paths to DragActions (downsampled for 6x speed-up)
+        # Step 3: Assess Starting Locations & Spatial Sequence (Structural + Nearest Neighbor Flow)
+        # Separate structural outlines from detail strokes
+        raw_paths.sort(key=lambda p: len(p), reverse=True)
+        primary_count = max(1, int(len(raw_paths) * 0.4))
+        structural_paths = raw_paths[:primary_count]
+        detail_paths = raw_paths[primary_count:]
+
+        def sort_spatially(paths_list):
+            """Sort paths greedily to minimize pen travel distance between consecutive strokes."""
+            if not paths_list:
+                return []
+            # Start from top-left-most path
+            paths_list.sort(key=lambda p: (p[0][1], p[0][0]))
+            ordered = [paths_list.pop(0)]
+            while paths_list:
+                last_pt = ordered[-1][-1]
+                best_idx = 0
+                best_dist = float("inf")
+                best_reverse = False
+
+                for idx, p in enumerate(paths_list):
+                    d_start = math.hypot(p[0][0] - last_pt[0], p[0][1] - last_pt[1])
+                    d_end = math.hypot(p[-1][0] - last_pt[0], p[-1][1] - last_pt[1])
+                    if d_start < best_dist:
+                        best_dist = d_start
+                        best_idx = idx
+                        best_reverse = False
+                    if d_end < best_dist:
+                        best_dist = d_end
+                        best_idx = idx
+                        best_reverse = True
+
+                next_path = paths_list.pop(best_idx)
+                if best_reverse:
+                    next_path.reverse()
+                ordered.append(next_path)
+            return ordered
+
+        ordered_structural = sort_spatially(structural_paths)
+        ordered_detail = sort_spatially(detail_paths)
+        final_ordered_paths = (ordered_structural + ordered_detail)[:max_strokes]
+
+        logger.info("Generated %d spatially optimized stroke paths", len(final_ordered_paths))
+
+        # Step 4: Convert paths to DragActions (smooth downsampling)
         drag_actions = []
-        for path in strokes:
+        for path in final_ordered_paths:
             simplified_path = []
-            step = 6  # Take every 6th point along the path
+            step = 5  # Downsample points for smooth stroke speed
             for idx in range(0, len(path), step):
                 simplified_path.append(path[idx])
             if path[-1] not in simplified_path:
@@ -157,8 +203,8 @@ class ArtisticPainter:
                         end_x=int(x2 + offset_x),
                         end_y=int(y2 + offset_y),
                         button=MouseButton.LEFT,
-                        duration_ms=40,  # Fast drawing strokes
-                        reasoning="Tracing edge outline",
+                        duration_ms=30,
+                        reasoning="Drawing outline stroke",
                     )
                 )
 
@@ -231,74 +277,181 @@ class ArtisticPainter:
         return actions
 
     def _generate_mountains(self, cx: int, cy: int) -> List[DragAction]:
-        """Generate a mountain range silhouette with a rising sun."""
+        """Generate an enhanced mountain landscape with sun rays, mountain hatching, trees, horizon, and birds."""
         actions = []
-        
-        # 1. Draw Sun (ellipse)
-        sun_r = 50
-        sun_cx = cx
-        sun_cy = cy - 60
-        sun_pts = []
-        for i in range(21):
-            theta = math.pi * i / 20  # Half circle top
-            x = sun_cx + sun_r * math.cos(theta)
-            y = sun_cy - sun_r * math.sin(theta)
-            sun_pts.append((int(x), int(y)))
-        
-        for i in range(len(sun_pts) - 1):
+
+        def add_line(p1: Tuple[int, int], p2: Tuple[int, int], desc: str, dur: int = 80):
             actions.append(
                 DragAction(
-                    start_x=sun_pts[i][0],
-                    start_y=sun_pts[i][1],
-                    end_x=sun_pts[i+1][0],
-                    end_y=sun_pts[i+1][1],
-                    button=MouseButton.LEFT,
-                    duration_ms=60,
-                    reasoning="Drawing sun",
+                    start_x=p1[0], start_y=p1[1],
+                    end_x=p2[0], end_y=p2[1],
+                    button=MouseButton.LEFT, duration_ms=dur,
+                    reasoning=desc,
                 )
             )
 
-        # 2. Draw Mountain ridges
+        # 1. Full Sun & Rays
+        sun_r = 45
+        sun_cx = cx
+        sun_cy = cy - 70
+        sun_pts = []
+        for i in range(25):
+            theta = 2 * math.pi * i / 24
+            x = sun_cx + sun_r * math.cos(theta)
+            y = sun_cy + sun_r * math.sin(theta)
+            sun_pts.append((int(x), int(y)))
+        
+        for i in range(len(sun_pts) - 1):
+            add_line(sun_pts[i], sun_pts[i+1], "Drawing sun disk", 40)
+
+        # Sun Rays
+        for i in range(8):
+            angle = (math.pi * i / 4) + (math.pi / 8)
+            x1 = sun_cx + (sun_r + 8) * math.cos(angle)
+            y1 = sun_cy + (sun_r + 8) * math.sin(angle)
+            x2 = sun_cx + (sun_r + 25) * math.cos(angle)
+            y2 = sun_cy + (sun_r + 25) * math.sin(angle)
+            add_line((int(x1), int(y1)), (int(x2), int(y2)), "Drawing sun ray", 60)
+
+        # 2. Main Mountain Range
         peaks = [
-            (cx - 200, cy + 80),
-            (cx - 100, cy - 20),
-            (cx, cy + 40),
-            (cx + 120, cy - 50),
-            (cx + 220, cy + 80)
+            (cx - 240, cy + 90),
+            (cx - 160, cy - 30),
+            (cx - 70, cy + 30),
+            (cx + 40, cy - 80),
+            (cx + 140, cy + 20),
+            (cx + 240, cy + 90)
         ]
         
         for i in range(len(peaks) - 1):
-            actions.append(
-                DragAction(
-                    start_x=peaks[i][0],
-                    start_y=peaks[i][1],
-                    end_x=peaks[i+1][0],
-                    end_y=peaks[i+1][1],
-                    button=MouseButton.LEFT,
-                    duration_ms=100,
-                    reasoning="Drawing mountain ridge line",
-                )
-            )
-            
-        # Draw second background ridge
-        peaks2 = [
-            (cx - 150, cy + 80),
-            (cx - 40, cy + 10),
-            (cx + 60, cy - 10),
-            (cx + 170, cy + 80)
+            add_line(peaks[i], peaks[i+1], "Drawing main mountain outline", 90)
+
+        # Main Peak Center Creases & Shading Lines
+        creases = [
+            (peaks[1], (cx - 160, cy + 90)),
+            (peaks[3], (cx + 40, cy + 90)),
         ]
-        for i in range(len(peaks2) - 1):
+        for top, bot in creases:
+            add_line(top, bot, "Drawing mountain peak ridge divide", 80)
+            # Add hatching on right side of ridge for 3D depth effect
+            for h in range(1, 5):
+                t = h / 5.0
+                hx1 = int(top[0] + (bot[0] - top[0]) * t)
+                hy1 = int(top[1] + (bot[1] - top[1]) * t)
+                hx2 = hx1 + 25
+                hy2 = hy1 + 15
+                add_line((hx1, hy1), (hx2, hy2), "Mountain shadow hatching", 50)
+
+        # 3. Horizon Ground Line
+        add_line((cx - 280, cy + 90), (cx + 280, cy + 90), "Drawing ground line", 100)
+
+        # 4. Pine Trees (Silhouettes along the base)
+        tree_xs = [cx - 210, cx - 180, cx + 180, cx + 210]
+        for tx in tree_xs:
+            # Trunk
+            add_line((tx, cy + 90), (tx, cy + 50), "Tree trunk", 50)
+            # Foliage triangles
+            add_line((tx - 15, cy + 75), (tx, cy + 55), "Tree branch", 40)
+            add_line((tx, cy + 55), (tx + 15, cy + 75), "Tree branch", 40)
+            add_line((tx - 10, cy + 62), (tx, cy + 45), "Tree top", 40)
+            add_line((tx, cy + 45), (tx + 10, cy + 62), "Tree top", 40)
+
+        # 5. Birds in the Sky
+        bird_centers = [(cx - 150, cy - 110), (cx - 110, cy - 130), (cx + 140, cy - 100)]
+        for bx, by in bird_centers:
+            add_line((bx - 12, by + 5), (bx, by), "Bird left wing", 40)
+            add_line((bx, by), (bx + 12, by + 5), "Bird right wing", 40)
+
+        return actions
+
+    def _generate_house(self, cx: int, cy: int) -> List[DragAction]:
+        """Generate vector strokes for a classic house preset (walls, roof, door, window, chimney, tree, sun)."""
+        actions = []
+
+        def add_line(p1: Tuple[int, int], p2: Tuple[int, int], desc: str):
             actions.append(
                 DragAction(
-                    start_x=peaks2[i][0],
-                    start_y=peaks2[i][1],
-                    end_x=peaks2[i+1][0],
-                    end_y=peaks2[i+1][1],
-                    button=MouseButton.LEFT,
-                    duration_ms=100,
-                    reasoning="Drawing background mountain ridge",
+                    start_x=p1[0], start_y=p1[1],
+                    end_x=p2[0], end_y=p2[1],
+                    button=MouseButton.LEFT, duration_ms=100,
+                    reasoning=desc,
                 )
             )
+
+        def add_rect(x1: int, y1: int, x2: int, y2: int, desc: str):
+            add_line((x1, y1), (x2, y1), desc)
+            add_line((x2, y1), (x2, y2), desc)
+            add_line((x2, y2), (x1, y2), desc)
+            add_line((x1, y2), (x1, y1), desc)
+
+        # 1. Main House Frame (Walls)
+        w, h = 180, 120
+        hx1, hy1 = cx - w // 2, cy - 20
+        hx2, hy2 = cx + w // 2, hy1 + h
+        add_rect(hx1, hy1, hx2, hy2, "House walls")
+
+        # 2. Roof (Triangle)
+        apex = (cx, hy1 - 80)
+        add_line((hx1 - 15, hy1), apex, "Roof left slope")
+        add_line(apex, (hx2 + 15, hy1), "Roof right slope")
+        add_line((hx1 - 15, hy1), (hx2 + 15, hy1), "Roof overhang base")
+
+        # 3. Chimney
+        ch_x1, ch_y1 = cx + 40, hy1 - 60
+        ch_x2, ch_y2 = cx + 60, hy1 - 30
+        add_line((ch_x1, ch_y1), (ch_x2, ch_y1), "Chimney top")
+        add_line((ch_x1, ch_y1), (ch_x1, hy1 - 40), "Chimney left side")
+        add_line((ch_x2, ch_y1), (ch_x2, hy1 - 15), "Chimney right side")
+
+        # 4. Front Door
+        dw, dh = 40, 70
+        dx1, dy1 = cx - dw // 2, hy2 - dh
+        dx2, dy2 = cx + dw // 2, hy2
+        add_rect(dx1, dy1, dx2, dy2, "Door frame")
+        # Door knob
+        add_line((cx + 12, hy2 - 35), (cx + 14, hy2 - 35), "Door knob")
+
+        # 5. Windows (Left and Right)
+        # Left window
+        lw_x1, lw_y1 = hx1 + 20, hy1 + 20
+        lw_x2, lw_y2 = lw_x1 + 35, lw_y1 + 35
+        add_rect(lw_x1, lw_y1, lw_x2, lw_y2, "Left window")
+        add_line(((lw_x1 + lw_x2) // 2, lw_y1), ((lw_x1 + lw_x2) // 2, lw_y2), "Left window vertical pane")
+        add_line((lw_x1, (lw_y1 + lw_y2) // 2), (lw_x2, (lw_y1 + lw_y2) // 2), "Left window horizontal pane")
+
+        # Right window
+        rw_x2, rw_y1 = hx2 - 20, hy1 + 20
+        rw_x1, rw_y2 = rw_x2 - 35, rw_y1 + 35
+        add_rect(rw_x1, rw_y1, rw_x2, rw_y2, "Right window")
+        add_line(((rw_x1 + rw_x2) // 2, rw_y1), ((rw_x1 + rw_x2) // 2, rw_y2), "Right window vertical pane")
+        add_line((rw_x1, (rw_y1 + rw_y2) // 2), (rw_x2, (rw_y1 + rw_y2) // 2), "Right window horizontal pane")
+
+        # 6. Ground Line
+        add_line((cx - 260, hy2), (cx + 260, hy2), "Ground line")
+
+        # 7. Tree on the left
+        tx = cx - 180
+        add_rect(tx - 10, hy2 - 60, tx + 10, hy2, "Tree trunk")
+        # Tree canopy (triangle)
+        add_line((tx - 35, hy2 - 60), (tx, hy2 - 120), "Tree canopy left")
+        add_line((tx, hy2 - 120), (tx + 35, hy2 - 60), "Tree canopy right")
+        add_line((tx - 35, hy2 - 60), (tx + 35, hy2 - 60), "Tree canopy base")
+
+        # 8. Sun on top right
+        sx, sy, sr = cx + 180, hy1 - 80, 20
+        for i in range(12):
+            a1 = 2 * math.pi * i / 12
+            a2 = 2 * math.pi * (i + 1) / 12
+            add_line((int(sx + sr * math.cos(a1)), int(sy + sr * math.sin(a1))),
+                     (int(sx + sr * math.cos(a2)), int(sy + sr * math.sin(a2))), "Sun circle segment")
+        # Sun rays
+        for i in range(8):
+            a = 2 * math.pi * i / 8
+            rx1 = int(sx + (sr + 5) * math.cos(a))
+            ry1 = int(sy + (sr + 5) * math.sin(a))
+            rx2 = int(sx + (sr + 18) * math.cos(a))
+            ry2 = int(sy + (sr + 18) * math.sin(a))
+            add_line((rx1, ry1), (rx2, ry2), "Sun ray")
 
         return actions
 
@@ -372,13 +525,40 @@ class ArtisticPainter:
         logger.info("Executing %d drawing strokes...", total)
         success_count = 0
 
-        # Hold mouse click down safety checks in pyautogui
+        # Ensure Pencil tool (black ink) is explicitly selected in MS Paint toolbar
+        self.executor.execute(ClickAction(x=170, y=105, button=MouseButton.LEFT, reasoning="Select Pencil tool"))
+
+        import pyautogui
+
+        # Fast stroke execution with physical mouse intervention safety check
         for idx, action in enumerate(strokes, 1):
+            if idx > 1:
+                try:
+                    cur_pos = pyautogui.position()
+                    prev_action = strokes[idx - 2]
+                    dist = math.hypot(cur_pos.x - prev_action.end_x, cur_pos.y - prev_action.end_y)
+                    # Fast physical intervention check (accounts for OS DPI display scaling offsets)
+                    if dist > 600:
+                        logger.warning(
+                            "Physical mouse movement detected during drawing (dist=%.1fpx). Aborting drawing safely.",
+                            dist,
+                        )
+                        pyautogui.mouseUp()
+                        return {
+                            "success": False,
+                            "message": (
+                                f"Drawing halted safely: User mouse intervention detected "
+                                f"(cursor moved {int(dist)}px away at stroke {idx - 1}/{total})"
+                            ),
+                            "completed_strokes": idx - 1,
+                            "total_strokes": total,
+                        }
+                except Exception:
+                    pass
+
             res = self.executor.execute(action)
             if res.get("success"):
                 success_count += 1
-            # Add small pause so user can abort if necessary
-            time.sleep(0.01)
 
         pct = (success_count / total) * 100
         return {

@@ -12,9 +12,14 @@ UACC exposes **25+ native MCP tools** (`mcp_uacc_*`) that you can call directly.
 | Keyboard shortcuts | `mcp_uacc_hotkey(keys=["ctrl","s"])` |
 | Launch an app | `mcp_uacc_launch_app(name_or_path="...")` |
 | Focus a window | `mcp_uacc_focus_window(title="...")` |
-| Wait for UI | `mcp_uacc_wait_for_element(name="...")` |
-| Clipboard | `mcp_uacc_clipboard_write` / `mcp_uacc_clipboard_read` |
-| Drag & scroll | `mcp_uacc_drag` / `mcp_uacc_scroll` |
+## ⚡ UACC Planner MC (Mandatory Tool Selector)
+
+**MANDATORY FOR ALL AI AGENTS**: Before initiating any UACC interactions (`click`, `type_text`, `paint_image`, `paint_preset`, `execute_actions`, etc.), you **MUST call `uacc_planner` first** to determine the optimal tool sequence, safety parameters, and bounding constraints for your task:
+
+1. **Drawing / Art**: Use `uacc_planner` to set canvas bounds, stroke caps, and tracing strategy before invoking `paint_image` or `paint_preset`.
+2. **UI Navigation**: Use `uacc_planner` then `get_screen_info` + `click_element` for fast textual targeting over raw vision.
+3. **Batch Actions**: Use `uacc_planner` to group mouse/keyboard events in `execute_actions` for single rapid transactions.
+4. **App Launch & Control**: Use `uacc_planner` to schedule `launch_app` followed by `type_text` or `hotkey`.
 
 ## Why
 
