@@ -150,17 +150,36 @@ class CDPBridge:
         browsers = ["msedge.exe", "chrome.exe", "brave.exe"]
 
         browser_path = None
-        for name in browsers:
-            try:
-                result = subprocess.run(
-                    ["where", name],
-                    capture_output=True, text=True, timeout=5,
-                )
-                if result.returncode == 0:
-                    browser_path = result.stdout.strip().split("\n")[0]
+        # Standard candidate installation paths on Windows
+        if sys.platform == "win32":
+            local_appdata = os.environ.get("LOCALAPPDATA", "")
+            program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
+            program_files_x86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
+            candidates = [
+                os.path.join(program_files, "Google\\Chrome\\Application\\chrome.exe"),
+                os.path.join(program_files_x86, "Google\\Chrome\\Application\\chrome.exe"),
+                os.path.join(local_appdata, "Google\\Chrome\\Application\\chrome.exe"),
+                os.path.join(program_files, "Microsoft\\Edge\\Application\\msedge.exe"),
+                os.path.join(program_files_x86, "Microsoft\\Edge\\Application\\msedge.exe"),
+                os.path.join(program_files, "BraveSoftware\\Brave-Browser\\Application\\brave.exe"),
+            ]
+            for candidate in candidates:
+                if os.path.exists(candidate):
+                    browser_path = candidate
                     break
-            except Exception:
-                continue
+
+        if not browser_path:
+            for name in browsers:
+                try:
+                    result = subprocess.run(
+                        ["where", name],
+                        capture_output=True, text=True, timeout=5,
+                    )
+                    if result.returncode == 0:
+                        browser_path = result.stdout.strip().split("\n")[0]
+                        break
+                except Exception:
+                    continue
 
         if not browser_path:
             logger.error("No Chromium browser found for CDP auto-launch")

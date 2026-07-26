@@ -458,11 +458,27 @@ def focus_window(title: str) -> Dict[str, Any]:
         if target_hwnd is None:
             return {"success": False, "message": f"No window found matching '{title}'"}
 
-        # Restore if minimized
+        # Restore if minimized or show
         if win32gui.IsIconic(target_hwnd):
             win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
+        else:
+            win32gui.ShowWindow(target_hwnd, win32con.SW_SHOW)
 
-        win32gui.SetForegroundWindow(target_hwnd)
+        try:
+            win32gui.SetForegroundWindow(target_hwnd)
+        except Exception:
+            # Win32 SetForegroundWindow restriction bypass: send Alt key down/up
+            try:
+                import win32api
+                win32api.keybd_event(win32con.VK_MENU, 0, 0, 0)
+                win32gui.SetForegroundWindow(target_hwnd)
+                win32api.keybd_event(win32con.VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)
+            except Exception:
+                try:
+                    win32gui.BringWindowToTop(target_hwnd)
+                except Exception:
+                    pass
+
         time.sleep(0.2)  # Allow window to come to front
 
         return {
@@ -992,11 +1008,11 @@ def open_url(url: str, profile_name: str | None = None) -> Dict[str, Any]:
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
 
-        # Try to launch via Chrome or Edge first to guarantee accessibility flags
+        # Try to launch via Chrome or Edge first to guarantee accessibility and CDP flags
         launched = False
         for browser in ["chrome", "msedge"]:
             try:
-                args = url
+                args = f"--remote-debugging-port=9222 --remote-allow-origins=* {url}"
                 if profile_name:
                     args = f'--profile-name="{profile_name}" ' + args
                 res = launch_application(browser, arguments=args)

@@ -388,6 +388,13 @@ def get_screen_info(include_non_interactive: bool = False, include_ocr: bool = F
             result["security_dialog_detected"] = True
             result["security_dialog_message"] = security_msg
 
+        if interactive_count <= 5 and not include_ocr:
+            result["canvas_or_custom_ui_hint"] = (
+                "Low interactive element count detected. The active application may be using HTML5 canvas, WebGL, or custom unlabeled controls. "
+                "Consider calling get_screen_info(include_ocr=True), screenshot(overlay='grid'), "
+                "detect_elements_visual, or vlm_locate_element for visual grounding."
+            )
+
         if include_non_interactive:
             result["full_yaml"] = text_map.to_yaml()
 
