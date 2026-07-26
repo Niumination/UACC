@@ -77,7 +77,7 @@ def test_open_url_launches_chrome(mock_webbrowser_open, mock_launch_app):
     res = open_url("google.com")
     assert res["success"] is True
     assert res["url"] == "https://google.com"
-    mock_launch_app.assert_called_with("chrome", arguments="https://google.com")
+    mock_launch_app.assert_called_with("chrome", arguments="--remote-debugging-port=9222 --remote-allow-origins=* https://google.com")
     assert not mock_webbrowser_open.called
 
 
@@ -330,4 +330,4 @@ def test_open_url_with_profile(mock_launch_app):
     mock_launch_app.return_value = {"success": True, "message": "Launched"}
     res = open_url("google.com", profile_name="Chris")
     assert res["success"] is True
-    mock_launch_app.assert_called_with("chrome", arguments='--profile-name="Chris" https://google.com')
+    mock_launch_app.assert_called_with("chrome", arguments='--profile-name="Chris" --remote-debugging-port=9222 --remote-allow-origins=* https://google.com')
