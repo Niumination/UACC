@@ -23,13 +23,18 @@ When building or prompting AI agents with UACC, adhere to these operational conv
 
 1. **Mandatory Planning (`uacc_planner`)**
    - Call `uacc_planner` before executing multi-step complex automation to get the optimal tool sequence.
-2. **Text-Map First, Vision Second**
-   - Prefer `get_screen_info` or `smart_click` for fast accessibility targeting over raw pixel visual grounding.
-   - Fall back to `detect_elements_visual` or `screenshot` for canvas apps, games, or remote desktop environments.
-3. **Action Verification**
-   - Take a snapshot with `take_snapshot` before performing state-altering UI actions, then verify with `verify_action`.
-4. **Batch Execution (`execute_actions`)**
+2. **Self-Healing & Target Clicking First (`smart_click` & `click(target=...)`)**
+   - Prefer passing text labels directly via `smart_click(target="...")` or `click(target="...")` over raw coordinate guessing. UACC automatically resolves coordinates via accessibility tree, OCR, and VLM.
+3. **Visual Overlays for Custom Canvas UIs**
+   - For video editors (Filmora), drawing apps, or games lacking accessibility tree elements, call `screenshot(overlay="markers")` (numbered Set-of-Mark badges) or `screenshot(overlay="grid")` (A1–Z27 coordinate grid). Do NOT visually guess raw `(x, y)` pixels from plain images.
+4. **1:1 Physical Pixel Grounding (Windows DPI Aware)**
+   - On Windows, UACC automatically initializes Per-Monitor DPI Awareness (`SetProcessDpiAwareness(2)`). Screen captures and mouse coordinates are locked to 1:1 physical pixels without scaling drift.
+5. **Action Verification**
+   - Take a snapshot with `take_snapshot` before performing state-altering UI actions, or pass `verify=True` to `smart_click` for automated visual confirmation.
+6. **Batch Execution (`execute_actions`)**
    - Combine rapid sequential keyboard/mouse steps inside `execute_actions` to minimize network/LLM roundtrips.
+7. **Background Tasks (`start_task`)**
+   - For repetitive or long-running tasks (e.g. clicking through 50 dialogs), use non-blocking background threads via `start_task` and poll progress with `get_task_status`.
 
 ---
 

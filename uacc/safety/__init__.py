@@ -9,5 +9,6 @@ Provides:
 
 from uacc.safety.classifier import RiskClassifier, RiskLevel
 from uacc.safety.gate import SafetyDecision, SafetyGate
+from uacc.safety.mouse_sentinel import MouseSentinel
 
-__all__ = ["RiskLevel", "RiskClassifier", "SafetyGate", "SafetyDecision"]
+__all__ = ["RiskLevel", "RiskClassifier", "SafetyGate", "SafetyDecision", "MouseSentinel"]

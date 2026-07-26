@@ -5,9 +5,18 @@ All notable changes to UACC will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] — 2026-07-26
+
+### 🎯 Precision Click & Visual Grounding Upgrade
+
+- **Windows Per-Monitor DPI Awareness** — Automatic process DPI initialization (`SetProcessDpiAwareness(2)`) at import time in `uacc/__init__.py`. Locks screen captures (`mss`) and mouse coordinate systems (`pyautogui`/Win32) to 1:1 physical pixels without scaling drift on high-DPI displays.
+- **Native Screenshot Overlays** — Added `overlay` parameter (`"markers"` or `"grid"`) to the `screenshot` MCP tool. Returns numbered Set-of-Mark badges with element legend or A1–Z27 coordinate grid inline.
+- **Target-Based Click Resolution** — Upgraded `click` tool to accept an optional `target="Element Name"` parameter. Automatically resolves bounding boxes via accessibility tree and falls back to self-healing VLM/OCR targeting (`smart_click`).
+- **Comprehensive Agent Documentation** — Synchronized tool registry and expanded documentation (`SKILL.md`, `AGENTS.md`, `README.md`) to explicitly cover all **68 Native MCP Tools** across 9 structured categories.
+
 ## [1.1.0] — 2026-07-25
 
-### 🚀 Supreme Release — 55 Native MCP Tools
+### 🚀 Supreme Release — 68 Native MCP Tools
 
 - **Browser DOM Bridge (CDP)** — 7 new tools (`browser_query`, `browser_get_page_info`, `browser_execute_js`, `browser_wait_for`, `browser_click`, `browser_type`, `browser_navigate`) connecting to Chrome/Edge via WebSocket for DOM-level CSS selector targeting.
 - **Cross-Platform Native Drivers** — Unified platform driver layer (`uacc/core/platform`) for Windows (`pywinauto`), macOS (`AppleScript`), and Linux (`xdotool` / `wmctrl`).

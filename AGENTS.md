@@ -2,22 +2,28 @@
 
 ## 🛜 MCP Tools Only — No Python Scripts
 
-UACC exposes **25+ native MCP tools** (`mcp_uacc_*`) that you can call directly. **Do NOT write separate Python scripts** that wrap or re-implement UACC's functionality. Use the built-in MCP tools:
+UACC exposes **68 native MCP tools** (`mcp_uacc_*`) that you can call directly. **Do NOT write separate Python scripts** that wrap or re-implement UACC's functionality. Use the built-in MCP tools:
 
 | What you want | Use this MCP tool |
 |---|---|
-| See the screen | `mcp_uacc_get_screen_info` or `mcp_uacc_screenshot` |
-| Click something | `mcp_uacc_click(x, y)` or `mcp_uacc_click_element(name="...")` |
-| Type text | `mcp_uacc_type_text(text="...")` |
+| See the screen (visual + badges) | `mcp_uacc_screenshot(overlay="markers")` or `mcp_uacc_screenshot(overlay="grid")` |
+| See the screen (text / UI tree) | `mcp_uacc_get_screen_info` |
+| Click something by name / self-healing | `mcp_uacc_smart_click(target="...")` or `mcp_uacc_click(target="...")` or `mcp_uacc_click_element(name="...")` |
+| Click at exact coordinates | `mcp_uacc_click(x, y)` |
+| Type text | `mcp_uacc_type_text(text="...")` or `mcp_uacc_smart_type(target="...", text="...")` |
 | Keyboard shortcuts | `mcp_uacc_hotkey(keys=["ctrl","s"])` |
 | Launch an app | `mcp_uacc_launch_app(name_or_path="...")` |
 | Focus a window | `mcp_uacc_focus_window(title="...")` |
+
 ## ⚡ UACC Planner MC (Mandatory Tool Selector)
 
 **MANDATORY FOR ALL AI AGENTS**: Before initiating any UACC interactions (`click`, `type_text`, `paint_image`, `paint_preset`, `execute_actions`, etc.), you **MUST call `uacc_planner` first** to determine the optimal tool sequence, safety parameters, and bounding constraints for your task:
 
 1. **Drawing / Art**: Use `uacc_planner` to set canvas bounds, stroke caps, and tracing strategy before invoking `paint_image` or `paint_preset`.
-2. **UI Navigation**: Use `uacc_planner` then `get_screen_info` + `click_element` for fast textual targeting over raw vision.
+2. **UI Navigation (PRECISION FIRST)**: Use `uacc_planner` then `get_screen_info` + `click_element` / `smart_click(target="...")` for fast textual targeting over raw vision.
+   - **DO NOT guess raw (x, y) coordinates from screenshots**. Plain image coordinates cause off-target clicks (DPI scaling & visual estimation drift).
+   - **Self-Healing Clicking**: You can pass `target="Element Name"` directly into `click(target="...")` or `smart_click(target="...")` to let UACC automatically resolve and verify exact screen coordinates.
+   - **Custom Canvas UI (Filmora / Video Editors / Games)**: If controls lack accessibility tree entries, call `screenshot(overlay="markers")` to get numbered Set-of-Mark badges, or `screenshot(overlay="grid")` to get an A1–Z27 coordinate grid before clicking.
 3. **Batch Actions**: Use `uacc_planner` to group mouse/keyboard events in `execute_actions` for single rapid transactions.
 4. **App Launch & Control**: Use `uacc_planner` to schedule `launch_app` followed by `type_text` or `hotkey`.
 
@@ -81,6 +87,85 @@ Workflows are stored as JSON files under `~/.uacc/workflows/`. They survive agen
 - Use tags like `"office"`, `"browser"`, `"dev"`, `"setup"` for organisation
 - Workflows can call any MCP tool (`click`, `type_text`, `hotkey`, `launch_app`, etc.)
 - After running, the workflow's `run_count` is incremented (useful to see which workflows are most used)
+
+## 🤖 Self-Healing, VLM & Grounding Tools
+
+UACC features advanced self-healing and visual grounding tools for complex applications (games, video editors, custom canvas UIs):
+
+| Tool | When to use |
+|---|---|
+| `smart_click(target="...", verify=True)` | Self-healing click with auto-retry across accessibility tree, OCR, and VLM. Automatically captures before/after snapshots to verify screen state changed. |
+| `smart_type(target="...", text="...")` | Self-healing input field locator and typing. |
+| `screenshot(overlay="markers")` | Captures screen with numbered Set-of-Mark badges overlaid on interactive elements and returns element legend. |
+| `screenshot(overlay="grid")` | Captures screen with A1–Z27 coordinate grid overlay. |
+| `vlm_locate_element(query="...")` | Uses Vision Language Model to locate bounding box of visual elements or icons that lack text or accessibility labels. |
+| `detect_elements_visual(target="...")` | Computer vision contour + OCR detection for custom canvas UIs. |
+| `get_screen_info_enhanced()` | Deep UI scan merging accessibility tree, OCR, and bounding box hierarchy. |
+| `take_snapshot` / `verify_action` | Take state snapshots and verify whether an action caused visual changes. |
+
+## ⏱️ Background Task Management (Async Operations)
+
+For long-running or repetitive automation tasks (e.g., clicking through 50 dialogs, polling for downloads), UACC provides non-blocking background task tools:
+
+| Tool | What it does |
+|---|---|
+| `start_task(name, action, params, iterations)` | Launch a background thread repeating an action non-blockingly. Returns `task_id`. |
+| `get_task_status(task_id)` | Poll task progress percentage, status (`running`, `completed`, `failed`), and output. |
+| `cancel_task(task_id)` | Gracefully terminate a background task. |
+| `list_tasks(status_filter?)` | List all running, pending, or completed tasks. |
+
+## 🌐 Browser DOM Bridge (CDP Automation)
+
+For web automation, use direct Chrome DevTools Protocol tools over WebSocket instead of visual clicking:
+
+| Tool | What it does |
+|---|---|
+| `browser_query(selector, ...)` | Query DOM elements via CSS selectors or XPath. |
+| `browser_click(selector)` | Directly click a web DOM element without moving the OS mouse. |
+| `browser_type(selector, text)` | Set value/type into a DOM input field. |
+| `browser_navigate(url)` | Navigate the active browser tab to a URL. |
+| `browser_get_page_info()` | Inspect current page title, URL, and DOM summary. |
+| `browser_execute_js(script)` | Execute arbitrary JavaScript in the browser context. |
+| `browser_wait_for(selector)` | Poll browser DOM until a CSS selector appears. |
+
+## 🧠 Memory, Knowledge Graph & BAP Tools
+
+UACC builds a semantic graph of cross-session automation patterns and supports Blind Agent Protocol (BAP) assertions:
+
+| Tool | What it does |
+|---|---|
+| `remember_action` / `query_knowledge` | Store and search cross-session automation patterns and UI behaviors. |
+| `recall_related_apps` / `app_action_history` | Query historical actions and learned patterns for a specific application. |
+| `memory_summary` | Get an executive summary of all learned knowledge graph nodes. |
+| `uacc_query` / `uacc_expect` / `uacc_where_is` | BAP semantic state querying, expectation assertions, and spatial locating. |
+
+## 🖥️ System, Display & Spatial Inspection
+
+| Tool | What it does |
+|---|---|
+| `list_monitors` / `get_system_info` / `list_processes` | Enumerate connected displays, CPU/RAM/disk metrics, and running OS processes. |
+| `find_element_relative` / `find_element_near` | Locate UI elements relative to labels ("button below Email") or near coordinates. |
+| `get_mouse_position` / `wait_for_element` | Get exact cursor coordinates or poll screen until an element appears. |
+
+## 📋 Clipboard, Drawing, Batching & Verification
+
+| Tool | What it does |
+|---|---|
+| `clipboard_read` / `clipboard_write` | Read from or write to the system clipboard. |
+| `paint_preset` / `paint_image` | Execute vector drawing presets or trace images onto MS Paint canvases. |
+| `execute_actions` / `get_action_history` | Batch sequential mouse/keyboard events or inspect recent action logs. |
+| `compare_snapshots` / `get_screen_diff` / `vlm_analyze` | Pixel/semantic diffing and general VLM scene analysis. |
+
+## 🛡️ Safety & Override Controls
+
+| Tool | What it does |
+|---|---|
+| `acknowledge_user_override()` | Acknowledge user resume confirmation and reset mouse pull-away kill flag. |
+| `set_kill_distance(pixels)` | Configure mouse pull-away safety kill distance (0 = adaptive default). |
+
+## ⚙️ Windows Per-Monitor DPI Awareness
+
+UACC automatically initializes Windows Per-Monitor DPI Awareness (`SetProcessDpiAwareness(2)`) at import time. This guarantees that screen captures (`mss`) and mouse coordinate systems (`pyautogui`/Win32) operate in 1:1 physical pixels without scaling drift on high-DPI or scaled displays (125%, 150%, 200%).
 
 ## Environment
 

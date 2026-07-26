@@ -27,6 +27,7 @@ from typing import Dict, List, Optional
 
 from uacc.actions.schema import Action
 from uacc.safety.classifier import RiskLevel
+from uacc.safety.mouse_sentinel import MouseSentinel
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,10 @@ class SafetyGate:
         self.policy = policy
         self._decisions: List[SafetyDecision] = []
         self._pending_confirmation: List[SafetyDecision] = []
+        self._sentinel: MouseSentinel | None = None
+
+    def set_sentinel(self, sentinel: MouseSentinel):
+        self._sentinel = sentinel
 
     def set_policy(self, policy: SafetyPolicy) -> None:
         self.policy = policy
@@ -89,6 +94,15 @@ class SafetyGate:
 
     def decide(self, action: Action, risk_level: Optional[RiskLevel] = None) -> SafetyDecision:
         """Evaluate whether an action is allowed under current policy."""
+        if self._sentinel and self._sentinel.check_killed():
+            return SafetyDecision(
+                decision=Decision.BLOCKED,
+                risk_level=RiskLevel.CRITICAL,
+                policy=self.policy,
+                reason="User override: mouse moved away from expected position",
+                action_id=f"user_override_{id(action)}",
+            )
+
         if risk_level is None:
             from uacc.safety.classifier import RiskClassifier
             risk_level = RiskClassifier().classify_action(action)

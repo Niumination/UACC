@@ -55,7 +55,11 @@ from uacc.actions.schema import (
 )
 from uacc.config import config
 from uacc.core.accessibility import get_ui_tree
+from uacc.core.cdp_bridge import CDPBridge
 from uacc.core.clipboard import read_clipboard as _clipboard_read, write_clipboard as _clipboard_write
+from uacc.core.grid_encoder import grid_cell_to_pixel, overlay_grid, overlay_markers, build_marker_legend
+from uacc.core.ocr_engine import extract_text as _ocr_extract
+from uacc.core.scene_graph import build_scene_graph
 from uacc.core.element_finder import (
     click_element_by_name,
     get_mouse_position as _get_mouse_position,
@@ -89,6 +93,7 @@ from uacc.memory.tools import (
     record_strategy_performance as _record_strategy,
     remember_action as _remember_action,
 )
+from uacc.safety.mouse_sentinel import MouseSentinel
 from uacc.planning import GoalDecomposer
 from uacc.tasks import TaskManager, TaskStatus
 from uacc.tools import ToolRegistry, ToolDef
@@ -117,6 +122,7 @@ mcp = FastMCP(
 # ── Shared Executor ──────────────────────────────────────────
 
 _executor: ActionExecutor | None = None
+_sentinel: MouseSentinel | None = None
 
 
 def _get_executor() -> ActionExecutor:
@@ -128,6 +134,29 @@ def _get_executor() -> ActionExecutor:
             safe_mode=config.uacc.safe_mode,
         )
     return _executor
+
+
+def _get_sentinel() -> MouseSentinel:
+    """Lazily create and start the shared MouseSentinel."""
+    global _sentinel
+    if _sentinel is None:
+        _sentinel = MouseSentinel()
+        _sentinel.start()
+    return _sentinel
+
+
+_SENTINEL_CHECK = None
+
+
+def _check_sentinel() -> str | None:
+    """Check if user override has been triggered. Returns error JSON if killed."""
+    if _get_sentinel().check_killed():
+        return json.dumps({
+            "success": False,
+            "error": "User override: mouse moved away",
+            "killed": True,
+        })
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -145,6 +174,7 @@ def screenshot(
     format: str = "PNG",
     quality: int = 80,
     save_path: str | None = None,
+    overlay: str | None = None,
 ) -> list[t.TextContent | t.ImageContent]:
     """Capture a screenshot of the screen.
 
@@ -161,6 +191,7 @@ def screenshot(
         format: Image format — "PNG" (lossless) or "JPEG" (smaller).
         quality: JPEG quality 1-100 (ignored for PNG).
         save_path: Optional local file path (e.g. "C:\\temp\\screen.png") to save the image.
+        overlay: Optional visual overlay helper — "grid" (A1, B2 coordinate grid), "markers" (numbered Set-of-Mark badges on UI elements).
 
     Returns:
         List containing JSON metadata and/or the inline screenshot image.
@@ -174,6 +205,22 @@ def screenshot(
             screen_w, screen_h = img.size
             region_info = f"full screen {screen_w}×{screen_h} (monitor {monitor_index})"
 
+        legend_text = ""
+        if overlay:
+            if overlay.lower() in ("grid", "grid_medium", "medium"):
+                img = overlay_grid(img, mode="medium")
+                legend_text = "Grid overlay active: Columns A-Z/AA-BB, Rows 1-27. Use grid_cell_to_pixel or paint_preset."
+            elif overlay.lower() in ("grid_fine", "fine"):
+                img = overlay_grid(img, mode="fine")
+                legend_text = "Fine grid overlay active."
+            elif overlay.lower() in ("grid_coarse", "coarse"):
+                img = overlay_grid(img, mode="coarse")
+                legend_text = "Coarse grid overlay active."
+            elif overlay.lower() in ("markers", "som", "badges", "som_markers"):
+                ui_elements = get_ui_tree()
+                img = overlay_markers(img, ui_elements)
+                legend_text = build_marker_legend(ui_elements)
+
         session = get_session()
 
         if save_path:
@@ -183,31 +230,39 @@ def screenshot(
             if dir_name:
                 os.makedirs(dir_name, exist_ok=True)
             img.save(save_path)
-            session.log_action("screenshot", {"region": region_info, "save_path": save_path}, {"success": True})
-            return [t.TextContent(type="text", text=json.dumps({
+            session.log_action("screenshot", {"region": region_info, "save_path": save_path, "overlay": overlay}, {"success": True})
+            res_dict = {
                 "success": True,
                 "saved_to": save_path,
                 "width": img.size[0],
                 "height": img.size[1],
                 "region": region_info,
-            }))]
+            }
+            if legend_text:
+                res_dict["legend"] = legend_text
+            return [t.TextContent(type="text", text=json.dumps(res_dict))]
 
         b64 = image_to_base64(img, fmt=format, quality=quality)
         media_type = get_image_media_type(format)
-        session.log_action("screenshot", {"region": region_info}, {"success": True})
+        session.log_action("screenshot", {"region": region_info, "overlay": overlay}, {"success": True})
+
+        res_dict = {
+            "success": True,
+            "width": img.size[0],
+            "height": img.size[1],
+            "region": region_info,
+        }
+        if legend_text:
+            res_dict["legend"] = legend_text
 
         return [
-            t.TextContent(type="text", text=json.dumps({
-                "success": True,
-                "width": img.size[0],
-                "height": img.size[1],
-                "region": region_info,
-            })),
+            t.TextContent(type="text", text=json.dumps(res_dict)),
             t.ImageContent(type="image", data=b64, mimeType=media_type)
         ]
 
     except Exception as exc:
         return [t.TextContent(type="text", text=json.dumps({"success": False, "error": format_error(exc, "Screenshot capture failed")}))]
+
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -350,22 +405,24 @@ def get_screen_info(include_non_interactive: bool = False, include_ocr: bool = F
 
 @mcp.tool()
 def click(
-    x: int,
-    y: int,
+    x: int = 0,
+    y: int = 0,
+    target: str | None = None,
     button: str = "left",
     count: int = 1,
     modifiers: list[str] | None = None,
     reasoning: str = "",
 ) -> str:
-    """Click at exact pixel coordinates on screen.
+    """Click at exact pixel coordinates or by target element name on screen.
 
     Use this when you have precise coordinates from get_screen_info or
-    find_element. For clicking by element name (fuzzy matched), use click_element instead.
+    find_element. If target is provided, automatically locates and clicks the named element.
     Coordinates are screen-absolute (0,0 = top-left).
 
     Args:
-        x: X coordinate in pixels from the left edge of the screen.
-        y: Y coordinate in pixels from the top edge of the screen.
+        x: X coordinate in pixels from the left edge of the screen (optional if target is provided).
+        y: Y coordinate in pixels from the top edge of the screen (optional if target is provided).
+        target: Optional text label or element name to click automatically via accessibility tree / OCR / VLM.
         button: Mouse button — "left", "right", or "middle".
         count: Click count — 1 for single click, 2 for double click.
         modifiers: Modifier keys to hold during click — e.g. ["ctrl"], ["shift", "ctrl"].
@@ -375,6 +432,22 @@ def click(
         JSON with success status, message, and the coordinates used.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
+        if target:
+            from uacc.core.element_finder import click_element_by_name
+            res = click_element_by_name(name=target, button=button, count=count, modifiers=modifiers)
+            if res.get("success"):
+                _get_sentinel().set_expected_position(res.get("click_x", x), res.get("click_y", y))
+                session = get_session()
+                session.log_action("click", {"target": target, "x": res.get("click_x"), "y": res.get("click_y"), "button": button, "count": count, "reasoning": reasoning}, res)
+                return json.dumps(res)
+            elif x == 0 and y == 0:
+                # If target was given and x,y are 0, fall back to smart_click self-healing
+                return smart_click(target=target, button=button, reasoning=reasoning or f"Click fallback for '{target}'")
+
         action = ClickAction(
             x=x,
             y=y,
@@ -386,6 +459,9 @@ def click(
 
         executor = _get_executor()
         result = executor.execute(action)
+
+        if result.get("success"):
+            _get_sentinel().set_expected_position(x, y)
 
         session = get_session()
         session.log_action(
@@ -433,6 +509,10 @@ def type_text(
         JSON with success status and character count.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         action = TypeAction(
             text=text,
             delay_ms=0,
@@ -485,6 +565,10 @@ def hotkey(
         JSON with success status and the key combination pressed.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         action = HotkeyAction(
             keys=keys,
             reasoning=reasoning,
@@ -528,6 +612,10 @@ def scroll(
         JSON with success status and scroll details.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         action = ScrollAction(
             x=x,
             y=y,
@@ -538,6 +626,9 @@ def scroll(
 
         executor = _get_executor()
         result = executor.execute(action)
+
+        if result.get("success"):
+            _get_sentinel().set_expected_position(x, y)
 
         session = get_session()
         session.log_action(
@@ -583,6 +674,10 @@ def drag(
         JSON with success status and drag details.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         action = DragAction(
             start_x=start_x,
             start_y=start_y,
@@ -595,6 +690,9 @@ def drag(
 
         executor = _get_executor()
         result = executor.execute(action)
+
+        if result.get("success"):
+            _get_sentinel().set_expected_position(end_x, end_y)
 
         session = get_session()
         session.log_action(
@@ -643,6 +741,10 @@ def hover(
         JSON with success status and hover details.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         action = HoverAction(
             x=x,
             y=y,
@@ -652,6 +754,9 @@ def hover(
 
         executor = _get_executor()
         result = executor.execute(action)
+
+        if result.get("success"):
+            _get_sentinel().set_expected_position(x, y)
 
         session = get_session()
         session.log_action(
@@ -817,6 +922,10 @@ def focus_window(title: str) -> str:
         JSON with success status and matched window title.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         result = _focus_window(title)
 
         session = get_session()
@@ -841,6 +950,10 @@ def resize_window(title: str, width: int, height: int) -> str:
         JSON with success status.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         result = _resize_window(title, width, height)
 
         session = get_session()
@@ -865,6 +978,10 @@ def move_window(title: str, x: int, y: int) -> str:
         JSON with success status.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         result = _move_window(title, x, y)
 
         session = get_session()
@@ -888,6 +1005,10 @@ def minimize_maximize(title: str, action: str = "maximize") -> str:
         JSON with success status.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         result = _min_max_window(title, action)
 
         session = get_session()
@@ -919,6 +1040,10 @@ def launch_app(
         JSON with success status and process info.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         result = _launch_app(name_or_path, arguments, wait_ms)
 
         session = get_session()
@@ -942,6 +1067,10 @@ def open_url(url: str, profile_name: str | None = None) -> str:
         JSON with success status.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         result = _open_url(url, profile_name=profile_name)
 
         session = get_session()
@@ -979,11 +1108,16 @@ def execute_actions(actions: list[dict]) -> list[t.TextContent | t.ImageContent]
     Returns:
         List containing a TextContent block with the JSON results of all steps, and an ImageContent block with the final screenshot.
     """
+    killed = _check_sentinel()
+    if killed:
+        return [t.TextContent(type="text", text=killed)]
+    
     from uacc.actions.schema import parse_action
     
     executor = _get_executor()
     results = []
     session = get_session()
+    last_mouse_pos: tuple[int, int] | None = None
     
     def get_final_result(success: bool, error: str | None = None, executed: int = 0):
         try:
@@ -1028,11 +1162,23 @@ def execute_actions(actions: list[dict]) -> list[t.TextContent | t.ImageContent]
         res = executor.execute(action_obj)
         results.append(res)
         session.log_action(f"batch_{action_obj.action}", act_dict, res)
+
+        # Track last mouse position for sentinel
+        action_name = action_obj.action
+        if res.get("success"):
+            if action_name in ("click", "hover", "scroll"):
+                last_mouse_pos = (act_dict.get("x", 0), act_dict.get("y", 0))
+            elif action_name == "drag":
+                last_mouse_pos = (act_dict.get("end_x", 0), act_dict.get("end_y", 0))
+            elif action_name == "click_element":
+                last_mouse_pos = (act_dict.get("click_x", 0), act_dict.get("click_y", 0))
         
         if not res.get("success", False):
             err_msg = f"Action at index {idx} ({action_obj.action}) failed: {res.get('message', '')}"
             return get_final_result(success=False, error=err_msg, executed=idx + 1)
             
+    if last_mouse_pos is not None:
+        _get_sentinel().set_expected_position(*last_mouse_pos)
     return get_final_result(success=True, executed=len(actions))
 
 
@@ -1072,6 +1218,10 @@ def clipboard_write(text: str) -> str:
         JSON with success status.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         result = _clipboard_write(text)
 
         session = get_session()
@@ -1176,6 +1326,10 @@ def click_element(
         JSON with clicked element info, matched text, and coordinates.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         find_result = click_element_by_name(
             name=name,
             element_type=element_type,
@@ -1199,6 +1353,9 @@ def click_element(
 
         executor = _get_executor()
         exec_result = executor.execute(action)
+
+        if exec_result.get("success"):
+            _get_sentinel().set_expected_position(click_x, click_y)
 
         session = get_session()
         session.log_action(
@@ -1260,6 +1417,10 @@ def paint_preset(preset_name: str) -> str:
         JSON with success status and drawing stroke details.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         # 1. Launch / focus Paint and maximize
         _launch_app("mspaint", wait_ms=1000)
         from uacc.core.window_manager import minimize_maximize_window
@@ -1300,6 +1461,10 @@ def paint_image(image_path: str, max_strokes: int = 500) -> str:
         JSON with success status and drawing stroke details.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         # 1. Launch / focus Paint and maximize window
         _launch_app("mspaint", wait_ms=1000)
         from uacc.core.window_manager import minimize_maximize_window
@@ -1576,6 +1741,10 @@ def create_workflow(
         JSON with success status and workflow details.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         parsed_steps = []
         for s in (steps or []):
             parsed_steps.append(WorkflowStep(
@@ -1668,6 +1837,10 @@ def delete_workflow(name: str) -> str:
         JSON with success status.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         store = get_store()
         existed = store.delete(name)
 
@@ -1695,6 +1868,10 @@ def run_workflow(name: str) -> str:
         JSON with execution results for every step.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         store = get_store()
         wf = store.get(name)
 
@@ -1789,6 +1966,9 @@ def remember_action(
     Returns:
         JSON summary of what was recorded.
     """
+    killed = _check_sentinel()
+    if killed:
+        return killed
     return _remember_action(app_name, action_name, element_label, result, reasoning)
 
 
@@ -1880,9 +2060,13 @@ def _populate_tool_registry() -> None:
         "get_system_info", "list_processes",
         # VLM tools
         "vlm_analyze", "vlm_locate_element",
+        # BAP — Blind Agent Protocol tools
+        "uacc_query", "uacc_where_is", "uacc_expect",
         # Browser DOM Bridge (CDP)
         "browser_query", "browser_get_page_info", "browser_execute_js",
         "browser_wait_for", "browser_click", "browser_type", "browser_navigate",
+        # Planning & Safety
+        "uacc_planner", "acknowledge_user_override", "set_kill_distance",
     ]
     # Memory tools
     supreme_tools = [
@@ -1951,6 +2135,10 @@ def start_task(
         JSON with task_id for status polling and cancellation.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         mgr = _get_task_manager()
         parsed_params = json.loads(params)
         executor = _get_executor()
@@ -2796,6 +2984,10 @@ def smart_click(
         JSON with success, method_used, retries, coordinates, and verification result.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         session = get_session()
         executor = _get_executor()
         attempts = []
@@ -2992,6 +3184,8 @@ def smart_click(
                     attempts.append({"strategy": "vision", "error": str(e)})
 
         success = any(a.get("success") for a in attempts)
+        if success and click_x and click_y:
+            _get_sentinel().set_expected_position(click_x, click_y)
 
         # Verification
         verification = None
@@ -3050,6 +3244,10 @@ def smart_type(
         JSON with success status, field targeting result, and verification.
     """
     try:
+        killed = _check_sentinel()
+        if killed:
+            return killed
+
         session = get_session()
         executor = _get_executor()
         field_result = None
@@ -3123,6 +3321,392 @@ def smart_type(
 
     except Exception as exc:
         return json.dumps({"success": False, "error": format_error(exc, "Smart type failed")})
+
+
+# ═══════════════════════════════════════════════════════════════
+#  BAP — BLIND AGENT PROTOCOL (vision-free screen understanding)
+# ═══════════════════════════════════════════════════════════════
+
+
+_CDP_BRIDGE: CDPBridge | None = None
+
+
+def _get_cdp_bridge() -> CDPBridge:
+    global _CDP_BRIDGE
+    if _CDP_BRIDGE is None:
+        _CDP_BRIDGE = CDPBridge()
+    return _CDP_BRIDGE
+
+
+@mcp.tool()
+def uacc_query(mode: str = "full") -> str:
+    """Get a unified snapshot of the entire screen state in one call.
+
+    Combines active window info, UI element tree, OCR text, clipboard state,
+    cursor position, and scene graph into a single structured response.
+    Designed for vision-less LLMs that need full context without multiple round-trips.
+
+    Args:
+        mode: "full" for everything, "fast" for just window + elements + scene graph,
+              "minimal" for just window title and element count.
+
+    Returns:
+        JSON with screen state: windows, active_window, elements, scene_graph,
+        clipboard, cursor, monitors, dom_context (if CDP available).
+    """
+    try:
+        from uacc.core.screen_capture import capture_full, get_screen_size, list_monitors as _list_mon
+        from uacc.core.window_manager import get_active_window as _get_win, list_windows as _list_win
+
+        result: dict = {}
+
+        active_window = _get_win()
+        result["active_window"] = active_window
+
+        if mode == "minimal":
+            title = (active_window or {}).get("title", "unknown")
+            elem_count = 0
+            try:
+                info = json.loads(get_screen_info(include_non_interactive=False))
+                elem_count = info.get("element_count", 0)
+            except Exception:
+                pass
+            return json.dumps({
+                "success": True,
+                "active_window": active_window,
+                "element_count": elem_count,
+                "scene_graph": f"Window: {title} | {elem_count} elements",
+            })
+
+        if mode in ("full", "fast"):
+            from uacc.core.accessibility import get_ui_tree
+            try:
+                elements_raw = get_ui_tree()
+                elements = [el.to_dict() if hasattr(el, 'to_dict') else el for el in (elements_raw or [])]
+            except Exception:
+                elements = []
+            result["elements"] = elements
+
+            screen_w, screen_h = get_screen_size()
+
+            ocr_texts = []
+            try:
+                img = capture_full()
+                ocr_results = _ocr_extract(img, mode="web")
+                ocr_texts = [
+                    {"text": r.text, "bounds": list(r.bounds), "center": list(r.center), "confidence": r.confidence}
+                    for r in ocr_results
+                ]
+            except Exception:
+                pass
+
+            scene_graph = build_scene_graph(
+                screen_w, screen_h, elements,
+                active_window=active_window,
+                ocr_results=ocr_texts,
+            )
+            result["scene_graph"] = scene_graph
+
+            try:
+                monitors = _list_mon()
+                if isinstance(monitors, list):
+                    result["monitors"] = monitors
+            except Exception:
+                pass
+
+            clipboard_data = _clipboard_read()
+            result["clipboard"] = clipboard_data
+
+            try:
+                from uacc.core.element_finder import get_mouse_position as _get_mouse
+                result["cursor"] = _get_mouse()
+            except Exception:
+                pass
+
+            if active_window:
+                title = (active_window.get("title") or "").lower()
+                process = (active_window.get("process") or "").lower()
+                if any(kw in title or kw in process for kw in ("chrome", "edge", "msedge")):
+                    bridge = _get_cdp_bridge()
+                    if bridge.ensure_cdp():
+                        try:
+                            pages = bridge.list_pages()
+                            if pages:
+                                result["dom_context"] = {
+                                    "tabs": [p.to_dict() for p in pages[:10]],
+                                    "connected": True,
+                                }
+                        except Exception:
+                            pass
+
+            result["success"] = True
+            return json.dumps(result)
+
+        return json.dumps({"success": False, "error": f"Unknown mode: {mode}"})
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "uacc_query failed")})
+
+
+@mcp.tool()
+def uacc_where_is(target: str, element_type: str = "") -> str:
+    """Find a UI element by description and return its precise screen coordinates.
+
+    Searches accessibility tree → OCR text → scene graph → CDP DOM (if available).
+    Returns location, confidence, and spatial context so the LLM can verify
+    intent before clicking.
+
+    Args:
+        target: Description of the element to find (e.g. "Send button",
+                "search input field", "Inbox").
+        element_type: Optional type filter (button, text_input, link, etc.).
+
+    Returns:
+        JSON with found status, coordinates, bounds, method, confidence,
+        and spatial context.
+    """
+    try:
+        from uacc.core.accessibility import get_ui_tree
+        from uacc.core.element_finder import find_element as _find_el
+        from uacc.core.screen_capture import capture_full, get_screen_size
+
+        target_lower = target.lower()
+
+        # 1. Try accessibility tree first (fastest, most reliable)
+        try:
+            elements_raw = get_ui_tree()
+            elements = [el.to_dict() if hasattr(el, 'to_dict') else el for el in (elements_raw or [])]
+            for el in elements:
+                name = (el.get("name") or el.get("text") or "").lower()
+                el_type = (el.get("type") or el.get("control_type") or "").lower()
+                if target_lower in name:
+                    if not element_type or element_type.lower() in el_type:
+                        cx, cy = el.get("center", (0, 0))
+                        if isinstance(cx, dict):
+                            cx, cy = cx.get("x", 0), cy.get("y", 0)
+                        return json.dumps({
+                            "found": True,
+                            "x": cx,
+                            "y": cy,
+                            "bounds": el.get("bounds"),
+                            "method": "accessibility_tree",
+                            "confidence": 0.9,
+                            "spatial_context": f"Found '{el.get('name', el.get('text', ''))}' ({el.get('type', '?')})",
+                        })
+        except Exception:
+            pass
+
+        # 2. Try OCR text search (catches web rendered text)
+        try:
+            img = capture_full()
+            ocr_results = _ocr_extract(img, mode="web", confidence_threshold=0.2)
+            for r in ocr_results:
+                if target_lower in r.text.lower():
+                    return json.dumps({
+                        "found": True,
+                        "x": r.center[0],
+                        "y": r.center[1],
+                        "bounds": list(r.bounds),
+                        "method": "ocr",
+                        "confidence": r.confidence,
+                        "spatial_context": f"OCR found '{r.text}'",
+                    })
+        except Exception:
+            pass
+
+        # 3. Try find_element (UACC's built-in fuzzy matching)
+        try:
+            found = _find_el(name=target)
+            if found:
+                cx, cy = found.get("center_x", 0), found.get("center_y", 0)
+                if cx or cy:
+                    return json.dumps({
+                        "found": True,
+                        "x": cx,
+                        "y": cy,
+                        "method": "find_element",
+                        "confidence": 0.7,
+                        "spatial_context": f"Found via fuzzy match: '{target}'",
+                    })
+        except Exception:
+            pass
+
+        # 4. Try CDP DOM query if browser is available
+        bridge = _get_cdp_bridge()
+        if bridge.ensure_cdp():
+            try:
+                bridge.connect()
+                selector_map = {
+                    "button": "button, input[type='submit'], input[type='button'], [role='button']",
+                    "input": "input, textarea",
+                    "link": "a",
+                    "search": "input[type='search'], [role='search'] input",
+                }
+                sel = selector_map.get(target_lower, f"*[aria-label*='{target}'], *:has-text('{target}')")
+                dom_el = bridge.query_selector(sel)
+                if dom_el and dom_el.bounds:
+                    bx, by = dom_el.bounds[0], dom_el.bounds[1]
+                    bw, bh = dom_el.bounds[2], dom_el.bounds[3]
+                    return json.dumps({
+                        "found": True,
+                        "x": int(bx + bw / 2),
+                        "y": int(by + bh / 2),
+                        "bounds": {"x": int(bx), "y": int(by), "width": int(bw), "height": int(bh)},
+                        "method": "cdp_dom",
+                        "confidence": 0.85,
+                        "spatial_context": f"DOM element <{dom_el.tag}>: '{dom_el.text[:60]}'",
+                    })
+            except Exception:
+                pass
+
+        return json.dumps({
+            "found": False,
+            "x": 0,
+            "y": 0,
+            "method": "",
+            "confidence": 0,
+            "spatial_context": f"Element '{target}' not found via any method",
+        })
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "uacc_where_is failed")})
+
+
+@mcp.tool()
+def uacc_expect(
+    action_name: str = "",
+    expected_change: str = "any",
+    expected_text: str = "",
+    timeout_ms: int = 5000,
+) -> str:
+    """Wait for an expected screen change and return a structured diff.
+
+    Captures the current screen state (window title, elements, text),
+    then polls until the expected change is detected or timeout.
+    Use this AFTER any action that should change the screen to verify it worked.
+
+    Args:
+        action_name: Name of the action just performed (for logging).
+        expected_change: Type of change expected:
+            "any" — any change to window title or elements,
+            "window_closed" — the active window changed,
+            "element_appeared" — expected_text should appear,
+            "window_title_changed" — the title should change,
+            "no_change" — verify nothing changed (for read-only actions).
+        expected_text: Specific text that should appear (for element_appeared).
+        timeout_ms: Maximum time to wait in milliseconds (default 5000).
+
+    Returns:
+        JSON with success (whether the expected change occurred),
+        before/after snapshots, diff description, and suggestion on failure.
+    """
+    try:
+        from uacc.core.window_manager import get_active_window as _get_win
+        from uacc.core.accessibility import get_ui_tree
+        from uacc.core.screen_capture import get_screen_size
+
+        def _capture_state():
+            win = _get_win() or {}
+            title = win.get("title", "")
+            elements = []
+            try:
+                raw = get_ui_tree()
+                elements = [el.to_dict() if hasattr(el, 'to_dict') else el for el in (raw or [])]
+            except Exception:
+                pass
+            element_texts = []
+            for el in elements:
+                t = el.get("text", "") or el.get("name", "") or ""
+                if t:
+                    element_texts.append(t.lower())
+            return {
+                "window_title": title,
+                "element_count": len(elements),
+                "element_texts": " ".join(element_texts),
+            }
+
+        before = _capture_state()
+        deadline = time.time() + (timeout_ms / 1000.0)
+        change_detected = False
+        change_type = ""
+        after = before
+
+        while time.time() < deadline:
+            time.sleep(0.5)
+            after = _capture_state()
+
+            if expected_change == "no_change":
+                change_detected = (
+                    after["window_title"] == before["window_title"] and
+                    after["element_count"] == before["element_count"]
+                )
+                if change_detected:
+                    change_type = "no_change_confirmed"
+                    break
+            elif expected_change == "window_closed":
+                if after["window_title"] != before["window_title"]:
+                    change_detected = True
+                    change_type = "window_title_changed"
+                    break
+            elif expected_change == "element_appeared":
+                if expected_text and expected_text.lower() in after["element_texts"]:
+                    change_detected = True
+                    change_type = "element_appeared"
+                    break
+                if after["element_count"] > before["element_count"]:
+                    change_detected = True
+                    change_type = "new_elements_appeared"
+                    break
+            elif expected_change == "window_title_changed":
+                if after["window_title"] != before["window_title"]:
+                    change_detected = True
+                    change_type = "window_title_changed"
+                    break
+            else:
+                if after["window_title"] != before["window_title"]:
+                    change_detected = True
+                    change_type = "window_title_changed"
+                    break
+                if after["element_count"] != before["element_count"]:
+                    change_detected = True
+                    change_type = "element_count_changed"
+                    break
+                if after["element_texts"] != before["element_texts"]:
+                    change_detected = True
+                    change_type = "text_content_changed"
+                    break
+
+        result = {
+            "success": change_detected,
+            "change_detected": change_detected,
+            "change_type": change_type if change_detected else "none",
+            "before": before,
+            "after": after,
+            "elapsed_ms": int((time.time() - (deadline - timeout_ms / 1000.0)) * 1000),
+            "action": action_name,
+        }
+
+        if not change_detected:
+            result["suggestion"] = _suggest_fix(before, after, action_name, expected_change)
+
+        session = get_session()
+        session.log_action("uacc_expect", {"action": action_name, "expected": expected_change}, result)
+
+        return json.dumps(result)
+
+    except Exception as exc:
+        return json.dumps({"success": False, "error": format_error(exc, "uacc_expect failed")})
+
+
+def _suggest_fix(before: dict, after: dict, action_name: str, expected: str) -> str:
+    """Generate a human-readable suggestion when an expected change didn't occur."""
+    if expected == "window_closed" and before["window_title"] == after["window_title"]:
+        return f"Window '{before['window_title']}' is still open. The action may not have worked. Try an alternative click target."
+    if expected == "element_appeared":
+        return f"Expected text not found. The element may be in a different state. Try uacc_query() to see current screen."
+    if before == after:
+        return "No change detected at all. The action likely failed. Try a different approach."
+    return f"Some state changed (elements: {before['element_count']}→{after['element_count']}) but not the expected type '{expected}'. Check uacc_query() for details."
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -3673,6 +4257,37 @@ def browser_navigate(url: str) -> str:
 
 
 
+# ═══════════════════════════════════════════════════════════════
+#  SENTINEL CONTROL TOOLS
+# ═══════════════════════════════════════════════════════════════
+
+
+@mcp.tool()
+def acknowledge_user_override() -> str:
+    """Acknowledge the user override and reset the kill flag so automation can resume.
+    
+    Call this after the user has confirmed they want to resume automation.
+    If no override is active, this is a no-op.
+    """
+    _get_sentinel().acknowledge_override()
+    return json.dumps({"success": True, "message": "Override acknowledged, kill flag reset"})
+
+
+@mcp.tool()
+def set_kill_distance(pixels: int) -> str:
+    """Set the mouse pull-away kill distance in pixels.
+    
+    The kill distance is how far the user must move the mouse from its
+    expected position to trigger an automation halt. Default is adaptive
+    (1 inch at current DPI, minimum 150px).
+    
+    Args:
+        pixels: Distance in pixels. Set to 0 to restore adaptive default.
+    """
+    _get_sentinel().set_kill_distance(pixels)
+    return json.dumps({"success": True, "message": f"Kill distance set to {pixels}px"})
+
+
 _populate_tool_registry()
 
 # ═══════════════════════════════════════════════════════════════
@@ -3762,17 +4377,24 @@ def main():
         args.verbose,
     )
 
-    if args.transport == "sse":
-        mcp.run(transport="sse", host=args.host, port=args.port)
-    elif args.transport == "streamable-http":
-        mcp.run(
-            transport="streamable-http",
-            host=args.host,
-            port=args.port,
-            path=args.path,
-        )
-    else:
-        mcp.run(transport="stdio")
+    # Initialize mouse sentinel for safety monitoring
+    _get_sentinel()
+
+    try:
+        if args.transport == "sse":
+            mcp.run(transport="sse", host=args.host, port=args.port)
+        elif args.transport == "streamable-http":
+            mcp.run(
+                transport="streamable-http",
+                host=args.host,
+                port=args.port,
+                path=args.path,
+            )
+        else:
+            mcp.run(transport="stdio")
+    finally:
+        if _sentinel:
+            _sentinel.stop()
 
 
 if __name__ == "__main__":
