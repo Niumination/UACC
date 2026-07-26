@@ -170,9 +170,15 @@ claude mcp add uacc --transport sse http://127.0.0.1:8765/sse
 
 To get the most out of UACC when pair programming with an agent:
 
-1. **Safety Controls (`safe_mode`)**:
+1. **Self-Healing Clicking (`smart_click` & `click(target=...)`)**:
+   Instead of forcing vision agents to guess raw `(x, y)` pixel coordinates from screenshots, instruct them to call `smart_click(target="Button Name")` or `click(target="...")`. UACC will automatically resolve bounding boxes via accessibility tree, OCR, and VLM with post-click verification.
+2. **Set-of-Mark & Grid Overlays**:
+   When automating custom canvas apps (like video editors or games where UI tree elements are missing), instruct the agent to use `screenshot(overlay="markers")` (numbered badges + legend) or `screenshot(overlay="grid")` (A1–Z27 coordinate grid).
+3. **Windows Per-Monitor DPI Awareness**:
+   UACC automatically enables Per-Monitor DPI Awareness (`SetProcessDpiAwareness(2)`) at import time on Windows. This locks screenshot dimensions (`mss`) and mouse cursor coordinates (`pyautogui`/Win32) to 1:1 physical pixels without scaling drift on 125%, 150%, or 200% scaled monitors.
+4. **Safety Controls (`safe_mode`)**:
    By default, `safe_mode` is enabled to block destructive actions. Keep this on so the AI agent does not accidentally execute system compromises or delete files.
-2. **Coordinate Auto-Correction**:
+5. **Coordinate Auto-Correction**:
    UACC has built-in coordinate validation. If the agent makes a minor mathematical error in mouse alignment, UACC automatically clamps the values to active screen boundaries.
-3. **Ask Permission**:
+6. **Ask Permission**:
    You can specify security constraints in agent configuration to prompt for approval on write actions (e.g. mouse clicks or typing) while allowing read actions (e.g. window listing, screenshotting) to run instantly in the background.

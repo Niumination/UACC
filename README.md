@@ -31,7 +31,7 @@
 
 ## 🔥 Pure MCP Server Architecture
 
-UACC is a **pure Model Context Protocol (MCP) server**. It exposes 25+ pixel-precise desktop control tools directly to any AI Agent (Claude Code, Hermes, Cursor, OpenCode, OpenClaw, Claude Desktop, etc.).
+UACC is a **pure Model Context Protocol (MCP) server**. It exposes 68 pixel-precise desktop control tools directly to any AI Agent (Claude Code, Hermes, Cursor, OpenCode, OpenClaw, Claude Desktop, etc.).
 
 > **💡 Vision optional:** Text-only AI models can "see" the screen through structured UI accessibility text maps with exact coordinates (`get_screen_info`). Vision-capable models can also capture raw or grid-encoded screenshots (`screenshot`).
 
@@ -41,13 +41,15 @@ UACC is a **pure Model Context Protocol (MCP) server**. It exposes 25+ pixel-pre
 
 | Feature | Description |
 |---------|-------------|
-| 🔌 **Pure MCP Server** | Works natively with Claude Code, Hermes, Cursor, OpenCode, OpenClaw, Claude Desktop (55 tools) |
+| 🔌 **Pure MCP Server** | Works natively with Claude Code, Hermes, Cursor, OpenCode, OpenClaw, Claude Desktop (68 tools) |
+| 🛡️ **Self-Healing Actions** | Auto-retry fallback chain (a11y → OCR → vision) with post-click verification (`smart_click`, `verify_action`) |
+| 🎯 **Target-Based Clicking** | Call `click(target="...")` or `smart_click(target="...")` to automatically resolve UI element coordinates |
+| 🖼️ **Visual Overlays** | Built-in Set-of-Mark badges (`screenshot(overlay="markers")`) and coordinate grids (`screenshot(overlay="grid")`) |
+| ⚙️ **Windows DPI Aware** | Automatic Per-Monitor DPI Awareness initialization locks screen captures and cursor systems to 1:1 physical pixels |
 | 🌐 **Browser DOM Bridge** | Chrome DevTools Protocol (CDP) integration for DOM-level CSS selector targeting (`browser_query`, `browser_click`) |
 | 🌐 **Cross-Platform** | Native platform drivers for Windows, macOS, and Linux |
-| 🛡️ **Self-Healing Actions** | Auto-retry fallback chain (a11y → OCR → vision) with visual action verification (`smart_click`, `verify_action`) |
 | 🤖 **Agent Agnostic** | Connect any MCP-compliant AI agent or custom MCP client |
 | 👁️ **Vision Optional** | Structured text map feeds allow text-only models to navigate with exact coordinates |
-| 🎯 **Pixel Precise** | Element locator, fuzzy button matching, sub-10px UI targeting |
 | 🖱️ **Human Mimicry** | Bézier curve mouse paths, variable typing speeds, natural pauses |
 | 💾 **Workflow Memory** | Create, save, inspect, and replay multi-step automations (`create_workflow`, `run_workflow`) |
 | 🛡️ **Safe Mode** | Built-in pattern blocking for destructive system commands |
@@ -74,42 +76,65 @@ python -m uacc
 
 ---
 
-## 🔌 MCP Tools (25 Native Tools)
+## 🔌 MCP Tools (68 Native Tools)
 
 When an AI agent connects to UACC, it gets access to standard desktop automation tools:
 
-### Screen Understanding & Navigation
-- `get_screen_info`: Returns a structured text map of interactive UI elements.
-- `screenshot`: Capture full screen or specified region image.
-- `find_element`: Search for UI elements by name or control type.
+### Screen Understanding, Grounding & Spatial (10 tools)
+- `get_screen_info`: Returns a structured text map of interactive UI elements with exact coordinates.
+- `get_screen_info_enhanced`: Deep accessibility tree + OCR + visual bounding box analysis.
+- `screenshot`: Capture full screen or region image. Supports `overlay="markers"` (numbered Set-of-Mark badges and legend) or `overlay="grid"` (A1–Z27 coordinate grid).
+- `list_monitors`: Enumerate connected displays with dimensions and DPI scales.
+- `find_element` / `uacc_where_is`: Locate UI elements and exact coordinates by name/type.
+- `find_element_relative` / `find_element_near`: Locate elements relative to labels ("button below Email") or near coordinates.
 - `get_mouse_position`: Get current mouse coordinates.
 - `wait_for_element`: Poll screen until a specific UI element appears.
 
-### Mouse & Keyboard Control
-- `click`: Click at precise screen coordinates `(x, y)`.
+### Mouse & Keyboard Control (9 tools)
+- `smart_click`: Self-healing click — finds target via accessibility tree, OCR, and VLM with post-click verification.
+- `smart_type`: Self-healing typing into input fields by name.
+- `click`: Click at precise coordinates `(x, y)` OR by `target="Element Name"` (auto-resolves coordinates).
 - `click_element`: Smart target and click an element by visible text/name.
 - `type_text`: Type text via simulated human typing.
 - `hotkey`: Trigger key combinations (e.g. `['ctrl', 's']`).
-- `scroll`: Scroll vertically/horizontally at a position.
-- `drag`: Perform Bézier curve drag-and-drop operations.
-- `hover`: Move cursor to coordinate position.
+- `scroll` / `drag` / `hover`: Advanced mouse movement controls.
 
-### Window Management & Applications
+### Window Management & App Control (9 tools)
 - `get_active_window`: Inspect focused window title, bounds, process.
 - `list_windows`: List all open desktop windows.
 - `focus_window`: Bring target window to foreground.
 - `resize_window`, `move_window`, `minimize_maximize`: Manage window size & state.
-- `launch_app`: Launch application by executable name or path.
-- `open_url`: Open URL in default browser.
+- `launch_app` / `open_url`: Launch application by executable name or URL.
+- `execute_actions`: Batch multiple sequential keyboard/mouse actions in a single rapid transaction.
 
-### Clipboard & Painting
+### Browser DOM Bridge — CDP (7 tools)
+- `browser_query`, `browser_click`, `browser_type`: Query, click, and type into DOM elements via CSS selectors over WebSocket.
+- `browser_navigate`, `browser_get_page_info`, `browser_execute_js`, `browser_wait_for`: DOM navigation, page inspection, script execution, and element polling.
+
+### Screen Diff, VLM & Action Verification (8 tools)
+- `take_snapshot`, `compare_snapshots`, `get_screen_diff`: Save snapshots, compare pixel/semantic changes, and get visual change overlays.
+- `verify_action`: Confirm whether the last action had its intended visual effect.
+- `vlm_analyze`, `vlm_locate_element`, `detect_elements_visual`: Use Vision Language Models or OpenCV contours for custom canvas/game UIs.
+- `get_action_history`: Retrieve recent action logs and verification results.
+
+### Memory, Knowledge Graph & BAP (7 tools)
+- `remember_action`, `query_knowledge`, `recall_related_apps`: Store and query cross-session automation patterns in a semantic graph.
+- `memory_summary`, `app_action_history`: Retrieve learned knowledge summaries and app-specific histories.
+- `uacc_query`, `uacc_expect`: Blind Agent Protocol (BAP) semantic state querying and expectation assertions.
+
+### System Inspection, Clipboard & Painting (6 tools)
+- `get_system_info`, `list_processes`: Inspect CPU, RAM, disk, display metrics, and running system processes.
 - `clipboard_read`, `clipboard_write`: Read/write system clipboard text.
-- `paint_preset`: Paint geometric presets in MS Paint (rose, galaxy, mountains, peacock).
-- `paint_image`: Convert image contours to mouse strokes in MS Paint.
+- `paint_preset`, `paint_image`: Vector drawing and image sketching in MS Paint.
 
-### Workflow & Task Management
+### Workflow, Planning & Task Management (10 tools)
+- `uacc_planner`: **MANDATORY FIRST STEP** — Decomposer & tool selector for any UI task.
 - `create_workflow`, `list_workflows`, `get_workflow`, `delete_workflow`, `run_workflow`: Persistent workflow memory stored in `~/.uacc/workflows/`.
-- `uacc_planner`: Mandatory planner tool to determine tool execution sequence and canvas constraints.
+- `start_task`, `get_task_status`, `cancel_task`, `list_tasks`: Background async task runner.
+
+### Safety & Override (2 tools)
+- `acknowledge_user_override`: Reset kill flag after user confirms resuming automation.
+- `set_kill_distance`: Configure mouse pull-away kill distance in pixels.
 
 ---
 
@@ -170,7 +195,7 @@ Add to your MCP configuration JSON:
 │               stdio │ SSE │ Streamable HTTP          │
 ├──────────────────────────────────────────────────────┤
 │                   UACC MCP Server                    │
-│   25+ Tools │ Screen Resources │ Workflow Memory     │
+│   68 Tools │ Screen Resources │ Workflow Memory      │
 ├──────────────────────────────────────────────────────┤
 │                   UACC Core Engine                   │
 │   Text Map │ Grid Encoder │ Accessibility Tree       │

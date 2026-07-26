@@ -15,24 +15,55 @@ logger = logging.getLogger(__name__)
 
 
 def read_clipboard() -> Dict[str, Any]:
-    """Read the current clipboard text content.
+    """Read the current clipboard text content and detect images.
 
     Returns:
-        Dict with success status and clipboard text.
+        Dict with success status, clipboard text, and image presence info.
     """
     text = _read_clipboard_text()
-    if text is not None:
-        return {
-            "success": True,
-            "text": text,
-            "length": len(text),
-            "message": f"Read {len(text)} characters from clipboard",
-        }
-    return {
-        "success": False,
-        "text": "",
-        "message": "Clipboard is empty or contains non-text data",
+    has_image, image_format = _check_clipboard_image()
+    result = {
+        "success": True,
+        "text": text or "",
+        "length": len(text) if text else 0,
+        "has_image": has_image,
+        "image_format": image_format,
     }
+    if text is not None:
+        result["message"] = f"Read {len(text)} characters from clipboard"
+    elif has_image:
+        result["message"] = f"Clipboard contains an image ({image_format})"
+    else:
+        result["success"] = False
+        result["message"] = "Clipboard is empty or contains non-text data"
+    return result
+
+
+def _check_clipboard_image() -> tuple[bool, str]:
+    """Check if the clipboard contains image data.
+
+    Returns:
+        Tuple of (has_image, format_description).
+    """
+    try:
+        import win32clipboard
+        win32clipboard.OpenClipboard()
+        try:
+            if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_DIB):
+                return True, "DIB (Device Independent Bitmap)"
+            if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_BITMAP):
+                return True, "Bitmap"
+            if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_TIFF):
+                return True, "TIFF"
+            if win32clipboard.IsClipboardFormatAvailable(win32clipboard.CF_ENHMETAFILE):
+                return True, "Enhanced Metafile"
+        finally:
+            win32clipboard.CloseClipboard()
+    except ImportError:
+        pass
+    except Exception:
+        pass
+    return False, ""
 
 
 def write_clipboard(text: str) -> Dict[str, Any]:

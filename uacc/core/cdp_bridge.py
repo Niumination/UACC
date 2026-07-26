@@ -18,7 +18,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import signal
 import socket
+import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -116,6 +119,107 @@ class CDPBridge:
                 return True
         except (OSError, ConnectionRefusedError):
             return False
+
+    def ensure_cdp(self, port: int = 9222, force: bool = False) -> bool:
+        """Find or auto-launch a CDP-enabled browser.
+
+        Probes the given port first. If no debug endpoint is found, launches
+        a headless Edge/Chrome instance with remote debugging enabled.
+
+        Args:
+            port: The CDP debug port (default 9222).
+            force: If True, kill any existing process on the port first.
+
+        Returns:
+            True if CDP is available, False otherwise.
+        """
+        if force:
+            self._kill_port_process(port)
+            time.sleep(1)
+
+        if self._is_port_open(port):
+            self._port = port
+            logger.info("CDP available on port %d", port)
+            return True
+
+        logger.info("No CDP on port %d — auto-launching browser", port)
+        return self._launch_headless(port)
+
+    def _launch_headless(self, port: int) -> bool:
+        """Launch a headless Edge/Chrome with remote debugging."""
+        browsers = ["msedge.exe", "chrome.exe", "brave.exe"]
+
+        browser_path = None
+        for name in browsers:
+            try:
+                result = subprocess.run(
+                    ["where", name],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if result.returncode == 0:
+                    browser_path = result.stdout.strip().split("\n")[0]
+                    break
+            except Exception:
+                continue
+
+        if not browser_path:
+            logger.error("No Chromium browser found for CDP auto-launch")
+            return False
+
+        user_dir = os.path.join(os.path.expanduser("~"), ".uacc", "cdp-profile")
+        os.makedirs(user_dir, exist_ok=True)
+
+        try:
+            proc = subprocess.Popen(
+                [
+                    browser_path,
+                    f"--remote-debugging-port={port}",
+                    "--remote-allow-origins=*",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    f"--user-data-dir={user_dir}",
+                    "about:blank",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            logger.info("Launched CDP browser (PID %d) on port %d", proc.pid, port)
+
+            for attempt in range(10):
+                time.sleep(1)
+                if self._is_port_open(port):
+                    self._port = port
+                    return True
+
+            logger.warning("CDP browser launched but port %d not responding", port)
+            return False
+        except Exception as exc:
+            logger.error("Failed to launch CDP browser: %s", exc)
+            return False
+
+    @staticmethod
+    def _kill_port_process(port: int) -> None:
+        """Kill any process holding the given port."""
+        try:
+            import win32api
+            import win32con
+            result = subprocess.run(
+                ["netstat", "-ano", "|", "findstr", f":{port}"],
+                capture_output=True, text=True, shell=True, timeout=5,
+            )
+            for line in result.stdout.strip().split("\n"):
+                parts = line.strip().split()
+                if len(parts) >= 5 and "LISTENING" in line:
+                    pid = int(parts[-1])
+                    try:
+                        handle = win32api.OpenProcess(win32con.PROCESS_TERMINATE, False, pid)
+                        win32api.TerminateProcess(handle, 1)
+                        win32api.CloseHandle(handle)
+                        logger.info("Killed PID %d holding port %d", pid, port)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
     def list_pages(self) -> List[CDPPage]:
         """List all open browser pages/tabs via the HTTP debug API."""
@@ -488,8 +592,9 @@ def get_cdp_bridge(port: int | None = None) -> CDPBridge:
 
 
 def auto_connect() -> CDPBridge:
-    """Auto-discover and connect to the active browser tab."""
+    """Auto-discover or auto-launch CDP and connect to the active browser tab."""
     bridge = get_cdp_bridge()
     if not bridge.connected:
+        bridge.ensure_cdp()
         bridge.connect()
     return bridge
