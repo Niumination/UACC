@@ -4443,6 +4443,23 @@ def main():
         stream=sys.stderr,
     )
 
+    # Check for newer version on PyPI (best-effort, non-blocking)
+    try:
+        import urllib.request, json
+        req = urllib.request.Request(
+            "https://pypi.org/pypi/uacc/json",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            latest = json.loads(resp.read())["info"]["version"]
+        if latest != uacc_version:
+            logger.warning(
+                "UACC %s available (you have %s) — run: pip install uacc --upgrade",
+                latest, uacc_version,
+            )
+    except Exception:
+        pass  # network failure is non-fatal
+
     logger.info(
         "Starting UACC MCP server (transport=%s, safe_mode=%s, verbose=%s)",
         args.transport,
