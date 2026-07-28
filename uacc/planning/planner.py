@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from uacc.config import config
@@ -69,6 +70,25 @@ class GoalDecomposer:
     def __init__(self):
         self._semantic_graph = SemanticGraph()
         self._tools_available = list(TOOL_CATALOG.keys())
+        self._plan_cache: Dict[tuple, Dict[str, Any]] = {}
+        self._plan_cache_ttl: float = 60.0  # seconds
+
+    def _get_cached_plan(self, key: tuple) -> Optional[Dict[str, Any]]:
+        entry = self._plan_cache.get(key)
+        if entry is not None:
+            age = time.monotonic() - entry["ts"]
+            if age < self._plan_cache_ttl:
+                logger.debug("Plan cache hit (%.1f s old)", age)
+                return entry["plan"]
+            del self._plan_cache[key]
+        return None
+
+    def _store_plan(self, key: tuple, plan: Dict[str, Any]) -> None:
+        self._plan_cache[key] = {"plan": plan, "ts": time.monotonic()}
+        # Evict oldest entry if cache exceeds limit
+        if len(self._plan_cache) > 64:
+            oldest = min(self._plan_cache, key=lambda k: self._plan_cache[k]["ts"])
+            del self._plan_cache[oldest]
 
     def decompose(
         self,
@@ -78,6 +98,9 @@ class GoalDecomposer:
     ) -> Dict[str, Any]:
         """Decompose a task into an executable plan.
 
+        Results are cached with a 60-second TTL so repeated calls with the
+        same task description avoid redundant LLM round-trips.
+
         Args:
             task_description: Natural language description of the goal.
             target_app: Optional target application name.
@@ -86,13 +109,21 @@ class GoalDecomposer:
         Returns:
             Plan dict with steps, tool recommendations, and reasoning.
         """
+        cache_key = (task_description, target_app, speed_mode)
+        cached = self._get_cached_plan(cache_key)
+        if cached is not None:
+            return cached
+
         app_context = self._get_app_context(target_app)
 
         plan = self._try_llm_decompose(task_description, target_app, speed_mode, app_context)
         if plan is not None:
+            self._store_plan(cache_key, plan)
             return plan
 
-        return self._heuristic_decompose(task_description, target_app, speed_mode, app_context)
+        plan = self._heuristic_decompose(task_description, target_app, speed_mode, app_context)
+        self._store_plan(cache_key, plan)
+        return plan
 
     def _get_app_context(self, target_app: str) -> Dict[str, Any]:
         """Query the semantic graph for known app patterns."""

@@ -11,10 +11,47 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# ── TTL Cache for accessibility tree ──────────────────────
+_TREE_CACHE: dict = {}
+_TREE_CACHE_MAX_AGE_MS: float = 800.0  # cache lives 800ms
+
+_TREE_CACHE_ENABLED: bool = True
+
+
+def invalidate_tree_cache() -> None:
+    """Clear the cached accessibility tree so the next call re-scans."""
+    _TREE_CACHE.clear()
+    logger.debug("Accessibility tree cache invalidated")
+
+
+def _get_cached_tree(window_title: str | None, max_depth: int) -> list | None:
+    """Return cached tree if it's fresh enough, else None."""
+    if not _TREE_CACHE_ENABLED:
+        return None
+    key = (window_title, max_depth)
+    entry = _TREE_CACHE.get(key)
+    if entry is not None:
+        age_ms = (time.monotonic() - entry["ts"]) * 1000
+        if age_ms < _TREE_CACHE_MAX_AGE_MS:
+            logger.debug("Tree cache hit (%.0f ms old)", age_ms)
+            return entry["tree"]
+        else:
+            logger.debug("Tree cache expired (%.0f ms old)", age_ms)
+            del _TREE_CACHE[key]
+    return None
+
+
+def _store_cached_tree(window_title: str | None, max_depth: int, tree: list) -> None:
+    if not _TREE_CACHE_ENABLED:
+        return
+    key = (window_title, max_depth)
+    _TREE_CACHE[key] = {"tree": tree, "ts": time.monotonic()}
 
 
 # ── Shared UIElement data model ────────────────────────────
@@ -107,8 +144,12 @@ except ImportError:
 
 # ── Dispatch ───────────────────────────────────────────────
 
-def get_ui_tree(window_title: Optional[str] = None, max_depth: int = 8) -> List[UIElement]:
+def get_ui_tree(window_title: Optional[str] = None, max_depth: int = 8, _skip_cache: bool = False) -> List[UIElement]:
     """Extract the accessibility tree for the active (or specified) window.
+
+    Results are cached with a short TTL (``_TREE_CACHE_MAX_AGE_MS``) so
+    consecutive calls within a brief window avoid re-scanning the tree.
+    Call ``invalidate_tree_cache()`` after any action that mutates the UI.
 
     Dispatches to the platform-specific implementation based on ``sys.platform``.
 
@@ -116,16 +157,26 @@ def get_ui_tree(window_title: Optional[str] = None, max_depth: int = 8) -> List[
         window_title: Substring match for the target window title (Windows only;
                       macOS/Linux always use the frontmost window).
         max_depth: Maximum recursion depth into the element tree.
+        _skip_cache: If True, bypass the cache and force a fresh scan.
 
     Returns:
         Flat-ish list of top-level UIElements (each may have children).
     """
+    if not _skip_cache:
+        cached = _get_cached_tree(window_title, max_depth)
+        if cached is not None:
+            return cached
+
     if sys.platform == "win32":
-        return _get_ui_tree_windows(window_title, max_depth)
+        result = _get_ui_tree_windows(window_title, max_depth)
     elif sys.platform == "darwin":
-        return _get_ui_tree_macos(max_depth)
+        result = _get_ui_tree_macos(max_depth)
     else:
-        return _get_ui_tree_linux(max_depth)
+        result = _get_ui_tree_linux(max_depth)
+
+    if not _skip_cache:
+        _store_cached_tree(window_title, max_depth, result)
+    return result
 
 
 # ═══════════════════════════════════════════════════════════
