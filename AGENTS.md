@@ -15,6 +15,12 @@ UACC exposes **68 native MCP tools** (`mcp_uacc_*`) that you can call directly. 
 | Launch an app | `mcp_uacc_launch_app(name_or_path="...")` |
 | Focus a window | `mcp_uacc_focus_window(title="...")` |
 
+## 🎨 Artistic Painter Mandate — Drawing & Design Tasks Only
+
+For ANY drawing task in ANY drawing app (Paint, Photoshop, Krita, etc.) or design app (Figma, Canva, Illustrator, etc.), you **MUST use `paint_preset` or `paint_image` exclusively** — these are the only "artistic painter" tools authorized for drawing/design work. Never attempt to draw by manually clicking, dragging, or issuing raw mouse coordinates. The artistic painter handles stroke planning, human-like Bézier curves, canvas bounds, and tracing.
+
+For all other non-drawing tasks (UI navigation, typing, clicking buttons, launching apps), use the standard UACC MCP tools as documented below. This mandate does NOT apply to standard UI automation.
+
 ## ⚡ UACC Planner MC (Mandatory Tool Selector)
 
 **MANDATORY FOR ALL AI AGENTS**: Before initiating any UACC interactions (`click`, `type_text`, `paint_image`, `paint_preset`, `execute_actions`, etc.), you **MUST call `uacc_planner` first** to determine the optimal tool sequence, safety parameters, and bounding constraints for your task:
