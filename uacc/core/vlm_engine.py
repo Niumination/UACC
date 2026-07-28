@@ -17,9 +17,11 @@ Each backend is tried in order of preference; the first configured provider wins
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, List, Tuple
@@ -99,6 +101,16 @@ Output ONLY valid JSON:
 {"found": true, "bounds_percent": {"left":0.3,"top":0.4,"right":0.5,"bottom":0.45}, "element_type":"button", "confidence":0.9}
 
 If not found: {"found": false, "reason": "explanation"}"""
+
+# ── VLM response cache ─────────────────────────────────────
+_VLM_CACHE: dict = {}
+_VLM_CACHE_TTL: float = 30.0  # seconds
+
+
+def _image_hash(image: Image.Image) -> str:
+    """Perceptual-ish hash: resize to 32×32, hash the bytes."""
+    small = image.resize((32, 32), Image.Resampling.LANCZOS).convert("L")
+    return hashlib.md5(small.tobytes()).hexdigest()
 
 
 class VLMEngine:
@@ -327,14 +339,30 @@ class VLMEngine:
         return elements
 
     def locate_element(self, image: Image.Image, target: str) -> VLMElement | None:
-        """Find a specific element by text / description and return its bounds."""
+        """Find a specific element by text / description and return its bounds.
+
+        Results are cached with a 30-second TTL so repeated queries on
+        the same screen avoid redundant API calls.
+        """
+        global _VLM_CACHE
         if not self.is_available():
             return None
+
+        cache_key = (_image_hash(image), target)
+        entry = _VLM_CACHE.get(cache_key)
+        if entry is not None:
+            age = time.monotonic() - entry["ts"]
+            if age < _VLM_CACHE_TTL:
+                logger.debug("VLM locate cache hit (%.1f s old)", age)
+                return entry["result"]
+            del _VLM_CACHE[cache_key]
+
         img_w, img_h = image.size
         prompt = LOCATE_PROMPT.format(target=target)
         raw = self._call_vlm(image, "You are a UI element locator.", prompt)
         data = self._parse_json(raw)
         if not data or not data.get("found"):
+            _VLM_CACHE[cache_key] = {"result": None, "ts": time.monotonic()}
             return None
 
         bp = data.get("bounds_percent", {})
@@ -342,7 +370,7 @@ class VLMEngine:
         top = int(bp.get("top", 0) * img_h)
         right = int(bp.get("right", 1) * img_w)
         bottom = int(bp.get("bottom", 1) * img_h)
-        return VLMElement(
+        result = VLMElement(
             text=target,
             bounds=(left, top, right, bottom),
             center=((left + right) // 2, (top + bottom) // 2),
@@ -350,6 +378,12 @@ class VLMEngine:
             confidence=data.get("confidence", 0.5),
             source="vlm",
         )
+        _VLM_CACHE[cache_key] = {"result": result, "ts": time.monotonic()}
+        # Evict if cache exceeds limit
+        if len(_VLM_CACHE) > 128:
+            oldest = min(_VLM_CACHE, key=lambda k: _VLM_CACHE[k]["ts"])
+            del _VLM_CACHE[oldest]
+        return result
 
 
 # Global singleton for import convenience

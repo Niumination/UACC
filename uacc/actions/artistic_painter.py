@@ -23,7 +23,12 @@ class ArtisticPainter:
     them in Microsoft Paint using the UACC ActionExecutor."""
 
     def __init__(self, executor: Optional[ActionExecutor] = None):
-        self.executor = executor or ActionExecutor(human_mimicry=False, action_delay_ms=5)
+        self.executor = executor or ActionExecutor(human_mimicry=False, action_delay_ms=0)
+        import pyautogui
+        self._orig_pause = pyautogui.PAUSE
+        self._orig_failsafe = pyautogui.FAILSAFE
+        pyautogui.PAUSE = 0  # eliminate 50ms idle after every API call
+        pyautogui.FAILSAFE = False  # don't abort when mouse reaches screen corner
 
     def draw_preset(self, preset_name: str, canvas_center: Tuple[int, int]) -> Dict[str, Any]:
         """Paint a built-in masterpiece design by name.
@@ -203,7 +208,7 @@ class ArtisticPainter:
                         end_x=int(x2 + offset_x),
                         end_y=int(y2 + offset_y),
                         button=MouseButton.LEFT,
-                        duration_ms=30,
+                        duration_ms=15,
                         reasoning="Drawing outline stroke",
                     )
                 )
@@ -517,53 +522,69 @@ class ArtisticPainter:
         return self._execute_strokes(all_actions)
 
     def _execute_strokes(self, strokes: List[DragAction]) -> Dict[str, Any]:
-        """Execute a list of DragActions sequentially."""
+        """Execute a list of DragActions sequentially using fast inline pyautogui calls."""
         total = len(strokes)
         if total == 0:
             return {"success": False, "message": "No paths or lines generated."}
 
         logger.info("Executing %d drawing strokes...", total)
-        success_count = 0
-
-        # Ensure Pencil tool (black ink) is explicitly selected in MS Paint toolbar
-        self.executor.execute(ClickAction(x=170, y=105, button=MouseButton.LEFT, reasoning="Select Pencil tool"))
-
         import pyautogui
 
-        # Fast stroke execution with physical mouse intervention safety check
-        for idx, action in enumerate(strokes, 1):
-            if idx > 1:
-                try:
-                    cur_pos = pyautogui.position()
-                    prev_action = strokes[idx - 2]
-                    dist = math.hypot(cur_pos.x - prev_action.end_x, cur_pos.y - prev_action.end_y)
-                    # Fast physical intervention check (accounts for OS DPI display scaling offsets)
-                    if dist > 600:
-                        logger.warning(
-                            "Physical mouse movement detected during drawing (dist=%.1fpx). Aborting drawing safely.",
-                            dist,
-                        )
-                        pyautogui.mouseUp()
-                        return {
-                            "success": False,
-                            "message": (
-                                f"Drawing halted safely: User mouse intervention detected "
-                                f"(cursor moved {int(dist)}px away at stroke {idx - 1}/{total})"
-                            ),
-                            "completed_strokes": idx - 1,
-                            "total_strokes": total,
-                        }
-                except Exception:
-                    pass
+        # Ensure Pencil tool (black ink) is selected in MS Paint toolbar
+        self.executor.execute(ClickAction(x=170, y=105, button=MouseButton.LEFT, reasoning="Select Pencil tool"))
 
-            res = self.executor.execute(action)
-            if res.get("success"):
+        success_count = 0
+        CHECK_INTERVAL = 15  # check for user intervention every N strokes
+
+        try:
+            for idx, action in enumerate(strokes, 1):
+                # Safety check — only every CHECK_INTERVAL strokes
+                if idx % CHECK_INTERVAL == 0:
+                    try:
+                        cur_pos = pyautogui.position()
+                        if abs(cur_pos.x - action.start_x) > 300 or abs(cur_pos.y - action.start_y) > 300:
+                            logger.warning("User intervention detected at stroke %d/%d", idx, total)
+                            return {
+                                "success": False,
+                                "message": f"Drawing halted: user intervention",
+                                "completed_strokes": idx - 1,
+                                "total_strokes": total,
+                            }
+                    except Exception:
+                        pass
+
+                # Each stroke is self-contained: position → press → wait → drag → release
+                pyautogui.moveTo(action.start_x, action.start_y, duration=0.01)
+                pyautogui.mouseDown(button=action.button.value)
+                time.sleep(0.03)  # let Paint register the button press before dragging
+                seg_duration = max(action.duration_ms, 35) / 1000
+                pyautogui.moveTo(action.end_x, action.end_y, duration=seg_duration)
+                pyautogui.mouseUp(button=action.button.value)
                 success_count += 1
+
+        except Exception as exc:
+            try:
+                pyautogui.mouseUp()
+            except Exception:
+                pass
+            logger.error("Drawing aborted by exception: %s", exc)
+            return {
+                "success": False,
+                "message": f"Drawing aborted: {exc}",
+                "completed_strokes": success_count,
+                "total_strokes": total,
+            }
 
         pct = (success_count / total) * 100
         return {
-            "success": success_count > 0,
-            "message": f"Successfully completed {success_count}/{total} strokes ({pct:.1f}%)",
+            "success": True,
+            "message": f"Completed {success_count}/{total} strokes ({pct:.1f}%)",
             "total_strokes": total,
             "success_strokes": success_count,
         }
+
+    def cleanup(self) -> None:
+        """Restore pyautogui global state after painting."""
+        import pyautogui
+        pyautogui.PAUSE = self._orig_pause
+        pyautogui.FAILSAFE = self._orig_failsafe

@@ -1,11 +1,13 @@
 """
 OCR Engine — extract visible text and positions from a screenshot.
 
-Uses EasyOCR for offline, GPU-accelerated text detection. The engine
-is loaded once and reused across calls for speed.
+Fast path (default): pytesseract — instant load, ~200ms per call.
+Heavy path (opt-in):  EasyOCR — GPU-accelerated, ~500-5000ms per call.
 
-GPU acceleration is auto-detected; falls back to CPU if no CUDA device
-is available. Set UACC_OCR_GPU=false to force CPU-only mode.
+Set ``UACC_OCR_HEAVY=true`` to use EasyOCR (more accurate, slower).
+Set ``UACC_OCR_GPU=false`` to force CPU even when CUDA is available.
+
+The engine is loaded once and reused across calls for speed.
 """
 
 from __future__ import annotations
@@ -23,8 +25,9 @@ os.environ.setdefault("TORCH_CPP_LOG_LEVEL", "ERROR")
 
 logger = logging.getLogger(__name__)
 
-# Lazy-loaded EasyOCR reader
+# Lazy-loaded OCR reader
 _reader: Optional[object] = None
+_gpu_cache: Optional[bool] = None  # lazy cache for GPU availability
 
 
 @dataclass
@@ -46,54 +49,69 @@ class OCRResult:
 
 
 def _gpu_available() -> bool:
-    """Check if CUDA is actually available before asking EasyOCR to use it."""
+    """Check if CUDA is actually available — result is cached after first call."""
+    global _gpu_cache
+    if _gpu_cache is not None:
+        return _gpu_cache
     try:
         import torch
-        return torch.cuda.is_available()
-    except ImportError:
-        return False
+        _gpu_cache = torch.cuda.is_available()
     except Exception:
-        return False
+        _gpu_cache = False
+    return _gpu_cache
 
 
 _PIL_FALLBACK = False
 
 
 def _get_reader() -> object:
-    """Lazily initialise the EasyOCR reader (downloads model on first run).
+    """Lazily initialise an OCR reader — fast path by default.
 
-    Falls back to a PIL+pytesseract based reader if EasyOCR is not installed.
-    If neither EasyOCR nor pytesseract is available, returns None (callers
-    must handle this gracefully).
+    Resolution order:
+    1. ``UACC_OCR_HEAVY=true`` → EasyOCR (PyTorch-based, GPU-accelerated, accurate but slow)
+    2. Default → pytesseract (instant load, fast CPU inference)
+       If pytesseract is not installed, falls back to EasyOCR, then None.
+
+    Returns ``None`` when no OCR engine is available (callers handle gracefully).
     """
     global _reader, _PIL_FALLBACK
-    if _reader is None and not _PIL_FALLBACK:
+    if _reader is not None:
+        return _reader
+    if _PIL_FALLBACK:
+        return None
+
+    use_heavy = os.environ.get("UACC_OCR_HEAVY", "").strip().lower() == "true"
+
+    if not use_heavy:
         try:
-            import easyocr
-
-            env_override = os.environ.get("UACC_OCR_GPU", "").strip().lower()
-            if env_override == "false":
-                use_gpu = False
-            elif env_override == "true":
-                use_gpu = True
-            else:
-                use_gpu = _gpu_available()
-
-            _reader = easyocr.Reader(
-                ["en"],
-                gpu=use_gpu,
-                verbose=False,
-            )
-            logger.info("EasyOCR reader initialised (gpu=%s)", use_gpu)
+            import pytesseract  # noqa: F401
+            _reader = "pytesseract"
+            logger.info("OCR ← pytesseract (fast mode)")
+            return _reader
         except ImportError:
-            logger.warning("EasyOCR not available, trying pytesseract fallback")
-            try:
-                import pytesseract
-                _reader = "pytesseract"
-                logger.info("Using pytesseract as OCR fallback")
-            except ImportError:
-                logger.warning("pytesseract also not available — OCR disabled")
-                _PIL_FALLBACK = True
+            logger.info("pytesseract not installed — trying EasyOCR")
+
+    try:
+        import easyocr
+
+        env_override = os.environ.get("UACC_OCR_GPU", "").strip().lower()
+        if env_override == "false":
+            use_gpu = False
+        elif env_override == "true":
+            use_gpu = True
+        else:
+            use_gpu = _gpu_available()
+
+        _reader = easyocr.Reader(
+            ["en"],
+            gpu=use_gpu,
+            verbose=False,
+        )
+        logger.info("OCR ← EasyOCR (heavy mode, gpu=%s)", use_gpu)
+    except ImportError:
+        logger.warning("No OCR engine available — install pytesseract for fast OCR: pip install pytesseract")
+        _PIL_FALLBACK = True
+
     return _reader  # type: ignore[return-value]
 
 

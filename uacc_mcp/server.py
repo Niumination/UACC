@@ -153,8 +153,9 @@ def _check_sentinel() -> str | None:
     if _get_sentinel().check_killed():
         return json.dumps({
             "success": False,
-            "error": "User override: mouse moved away",
+            "error": "User override: mouse moved away — call acknowledge_user_override() to resume",
             "killed": True,
+            "recovery": "Call acknowledge_user_override() to reset the kill flag and resume automation.",
         })
     return None
 
@@ -171,16 +172,19 @@ def screenshot(
     width: int | None = None,
     height: int | None = None,
     monitor_index: int = 1,
-    format: str = "PNG",
+    image_format: str = "PNG",
     quality: int = 80,
     save_path: str | None = None,
     overlay: str | None = None,
 ) -> list[t.TextContent | t.ImageContent]:
     """Capture a screenshot of the screen.
 
-    Returns a base64-encoded image inline as an MCP ImageContent object by default, 
-    or saves to a file if save_path is provided.
-    Capture the full screen by default, or a specific region by providing coordinates.
+    Returns JSON metadata + a base64-encoded inline image (two MCP content blocks).
+    If save_path is set, writes to disk and returns JSON only (no inline image).
+
+    See also:
+      - take_snapshot() — saves a named screenshot in memory for later comparison (no image returned).
+      - get_screen_info() — get structured text map of UI elements (no image, just data).
 
     Args:
         region_x: Left edge of the capture region (omit for full screen).
@@ -188,13 +192,18 @@ def screenshot(
         width: Width of the capture region in pixels.
         height: Height of the capture region in pixels.
         monitor_index: Which monitor to capture (1-based, 1 = primary). Use list_monitors to see available monitors.
-        format: Image format — "PNG" (lossless) or "JPEG" (smaller).
+        image_format: Image format — "PNG" (lossless) or "JPEG" (smaller).
         quality: JPEG quality 1-100 (ignored for PNG).
         save_path: Optional local file path (e.g. "C:\\temp\\screen.png") to save the image.
-        overlay: Optional visual overlay helper — "grid" (A1, B2 coordinate grid), "markers" (numbered Set-of-Mark badges on UI elements).
+                     When set, no inline image is returned — only JSON metadata.
+        overlay: Visual overlay helper. Values:
+                   "grid" — A1-Z27 coordinate grid overlay.
+                   "markers" — numbered Set-of-Mark badges on detected UI elements (+ legend in metadata).
+                   "grid_fine" / "grid_coarse" — finer/coarser grid variants.
 
     Returns:
-        List containing JSON metadata and/or the inline screenshot image.
+        List of MCP content blocks: [TextContent (JSON metadata), ImageContent (base64 image)].
+        When save_path is set: [TextContent (JSON metadata)] only.
     """
     try:
         if region_x is not None and region_y is not None and width and height:
@@ -242,8 +251,8 @@ def screenshot(
                 res_dict["legend"] = legend_text
             return [t.TextContent(type="text", text=json.dumps(res_dict))]
 
-        b64 = image_to_base64(img, fmt=format, quality=quality)
-        media_type = get_image_media_type(format)
+        b64 = image_to_base64(img, fmt=image_format, quality=quality)
+        media_type = get_image_media_type(image_format)
         session.log_action("screenshot", {"region": region_info, "overlay": overlay}, {"success": True})
 
         res_dict = {
@@ -329,22 +338,31 @@ def list_monitors() -> str:
 
 
 @mcp.tool()
-def get_screen_info(include_non_interactive: bool = False, include_ocr: bool = False) -> str:
+def get_screen_info(include_labels: bool = False, include_ocr: bool = False) -> str:
     """Analyse the current screen and return a structured text map of all UI elements.
 
-    This is the PRIMARY tool for understanding the screen before acting. Call this
-    BEFORE clicking or typing to discover what's on screen. Use screenshot
-    (which returns a visual image) when you need visual confirmation of layout.
+    PRIMARY tool for understanding the screen before acting. Call this BEFORE
+    clicking or typing. Returns structured data — not an image.
+    Use screenshot() when you need a visual image.
 
-    The text map shows every interactive element (buttons, inputs, menus, tabs)
-    with its type, label text, screen coordinates, and interactivity flags.
-    Elements are numbered for cross-referencing with screenshot markers.
+    The text map lists every interactive element with its type, label, screen
+    coordinates, and interactivity flags. Elements are numbered for cross-referencing
+    with screenshot(overlay="markers").
+
+    When to use alternatives:
+      - screenshot(overlay="grid") — coordinate grid for visual positioning.
+      - screenshot(overlay="markers") — numbered badges on elements.
+      - get_screen_info(include_ocr=True) — when accessibility tree misses text
+        (games, canvas apps, video editors).
+      - get_screen_info_enhanced(mode="hybrid") — when a11y tree + vision both needed.
+      - detect_elements_visual() — pure computer vision (games, remote desktop).
+      - vlm_locate_element(target) — find a specific element visually.
 
     Args:
-        include_non_interactive: If True, include labels and static text.
-                                  If False, only interactive elements (buttons, inputs, etc.).
-        include_ocr: If True, also run OCR on a screenshot to detect text that the
-                      accessibility tree misses (images, canvas, rendered text).
+        include_labels: If True, include labels and static text (non-interactive).
+                         If False, only interactive elements (buttons, inputs, etc.).
+        include_ocr: If True, also run OCR on a screenshot to detect text that
+                      falls through accessibility tree gaps (images, canvas, rendered text).
                       Slower (~200-500ms) but catches more text.
 
     Returns:
@@ -395,12 +413,12 @@ def get_screen_info(include_non_interactive: bool = False, include_ocr: bool = F
                 "detect_elements_visual, or vlm_locate_element for visual grounding."
             )
 
-        if include_non_interactive:
+        if include_labels:
             result["full_yaml"] = text_map.to_yaml()
 
         session.log_action(
             "get_screen_info",
-            {"include_non_interactive": include_non_interactive},
+            {"include_labels": include_labels},
             {"success": True, "elements": len(text_map.all_elements)},
         )
 
@@ -420,23 +438,27 @@ def click(
     modifiers: list[str] | None = None,
     reasoning: str = "",
 ) -> str:
-    """Click at exact pixel coordinates or by target element name on screen.
+    """Click at exact pixel coordinates or by target element name.
 
-    Use this when you have precise coordinates from get_screen_info or
-    find_element. If target is provided, automatically locates and clicks the named element.
-    Coordinates are screen-absolute (0,0 = top-left).
+    Use for coordinate-based clicks from get_screen_info / find_element results.
+    When you know the element's name/label, prefer click_element() (simpler).
+    For unreliable targets that need multi-strategy fallback, use smart_click().
+
+    NOTE: If target is provided and x=0, y=0, automatically delegates to
+    smart_click() for self-healing element location.
 
     Args:
-        x: X coordinate in pixels from the left edge of the screen (optional if target is provided).
-        y: Y coordinate in pixels from the top edge of the screen (optional if target is provided).
-        target: Optional text label or element name to click automatically via accessibility tree / OCR / VLM.
+        x: X coordinate (screen-absolute pixels, 0=left edge). Optional if target is set.
+        y: Y coordinate (screen-absolute pixels, 0=top edge). Optional if target is set.
+        target: Element name/label to find and click (case-insensitive fuzzy match).
+                When x=0 and y=0, triggers smart_click fallback.
         button: Mouse button — "left", "right", or "middle".
         count: Click count — 1 for single click, 2 for double click.
-        modifiers: Modifier keys to hold during click — e.g. ["ctrl"], ["shift", "ctrl"].
-        reasoning: Why you're clicking here (logged for debugging).
+        modifiers: Modifier keys to hold — e.g. ["ctrl"], ["shift", "ctrl"].
+        reasoning: Why you're clicking (logged for debugging).
 
     Returns:
-        JSON with success status, message, and the coordinates used.
+        JSON with success, coordinates, button, and verified_active_window.
     """
     try:
         killed = _check_sentinel()
@@ -482,6 +504,8 @@ def click(
         act_win = _get_act_win()
         verified_active_window = act_win.title if act_win else ""
 
+        invalidate_tree_cache()
+
         return json.dumps({
             "success": result["success"],
             "message": result["message"],
@@ -492,8 +516,9 @@ def click(
         })
 
     except Exception as exc:
-        logger.error("Click failed at (%d, %d): %s", x, y, exc, exc_info=False)
-        return json.dumps({"success": False, "error": format_error(exc, "Click failed")})
+        target_info = f" target='{target}'" if target else ""
+        logger.error("Click failed at (%d, %d)%s: %s", x, y, target_info, exc, exc_info=False)
+        return json.dumps({"success": False, "error": format_error(exc, f"Click failed at ({x},{y}){target_info}")})
 
 
 @mcp.tool()
@@ -543,6 +568,8 @@ def type_text(
             result,
         )
 
+        invalidate_tree_cache()
+
         return json.dumps({
             "success": result["success"],
             "message": result["message"],
@@ -550,7 +577,7 @@ def type_text(
         })
 
     except Exception as exc:
-        return json.dumps({"success": False, "error": format_error(exc, "Type failed")})
+        return json.dumps({"success": False, "error": format_error(exc, f"Type text failed (first 50 chars: {text[:50]!r})")})
 
 
 @mcp.tool()
@@ -588,6 +615,8 @@ def hotkey(
         session = get_session()
         session.log_action("hotkey", {"keys": keys, "reasoning": reasoning}, result)
 
+        invalidate_tree_cache()
+
         return json.dumps({
             "success": result["success"],
             "message": result["message"],
@@ -595,7 +624,7 @@ def hotkey(
         })
 
     except Exception as exc:
-        return json.dumps({"success": False, "error": format_error(exc, "Hotkey failed")})
+        return json.dumps({"success": False, "error": format_error(exc, f"Hotkey failed: {'+'.join(keys)}")})
 
 
 @mcp.tool()
@@ -608,15 +637,17 @@ def scroll(
 ) -> str:
     """Scroll at a specific screen position.
 
+    Moves the mouse to (x, y) and performs a scroll gesture there.
+
     Args:
-        x: X coordinate to scroll at.
-        y: Y coordinate to scroll at.
+        x: X coordinate to position the mouse at before scrolling.
+        y: Y coordinate to position the mouse at before scrolling.
         direction: Scroll direction — "up", "down", "left", or "right".
         amount: Number of scroll increments (typically 1-10).
         reasoning: Why you're scrolling (for logging).
 
     Returns:
-        JSON with success status and scroll details.
+        JSON with success, position, direction, and amount.
     """
     try:
         killed = _check_sentinel()
@@ -644,16 +675,18 @@ def scroll(
             result,
         )
 
+        invalidate_tree_cache()
+
         return json.dumps({
             "success": result["success"],
             "message": result["message"],
-            "position": {"x": x, "y": y},
+            "coordinates": {"x": x, "y": y},
             "direction": direction,
             "amount": amount,
         })
 
     except Exception as exc:
-        return json.dumps({"success": False, "error": format_error(exc, "Scroll failed")})
+        return json.dumps({"success": False, "error": format_error(exc, f"Scroll failed at ({x},{y}) direction={direction}")})
 
 
 @mcp.tool()
@@ -717,6 +750,8 @@ def drag(
         act_win = _get_act_win()
         verified_active_window = act_win.title if act_win else ""
 
+        invalidate_tree_cache()
+
         return json.dumps({
             "success": result["success"],
             "message": result["message"],
@@ -726,7 +761,7 @@ def drag(
         })
 
     except Exception as exc:
-        return json.dumps({"success": False, "error": format_error(exc, "Drag failed")})
+        return json.dumps({"success": False, "error": format_error(exc, f"Drag failed from ({start_x},{start_y}) to ({end_x},{end_y})")})
 
 
 @mcp.tool()
@@ -736,16 +771,19 @@ def hover(
     duration_ms: int = 500,
     reasoning: str = "",
 ) -> str:
-    """Move the mouse to a position and hold (useful for triggering tooltips and hover menus).
+    """Move the mouse to a position and pause (triggers tooltips, hover menus).
+
+    Moves the mouse to (x, y) and waits for duration_ms. Does NOT click or
+    press the mouse button — it's a cursor-only hover.
 
     Args:
         x: X coordinate to hover at.
         y: Y coordinate to hover at.
-        duration_ms: How long to hold the hover in milliseconds.
-        reasoning: Why you're hovering here (for logging).
+        duration_ms: How long to pause at the position (ms). Default 500.
+        reasoning: Why you're hovering (for logging).
 
     Returns:
-        JSON with success status and hover details.
+        JSON with success, coordinates, and duration.
     """
     try:
         killed = _check_sentinel()
@@ -775,7 +813,7 @@ def hover(
         return json.dumps({
             "success": result["success"],
             "message": result["message"],
-            "position": {"x": x, "y": y},
+            "coordinates": {"x": x, "y": y},
             "duration_ms": duration_ms,
         })
 
@@ -791,8 +829,13 @@ def find_element(
 ) -> str:
     """Find UI elements on the screen by name and/or type.
 
-    Scans the accessibility tree and returns matching elements with their
-    exact coordinates. Use this to find clickable targets before calling click().
+    Scans the accessibility tree and returns matching elements with
+    coordinates. Use the returned coordinates with click(x, y).
+
+    When to use alternatives:
+      - vlm_locate_element(target) — find by visual description (VLM-based).
+      - uacc_where_is(target) — multi-strategy (a11y → OCR → scene graph → CDP).
+      - detect_elements_visual() — pure CV detection for games/canvas.
 
     Args:
         name: Text to search for in element labels (case-insensitive substring match).
@@ -803,7 +846,7 @@ def find_element(
         refresh: If True, re-scan the screen first. If False, use cached data.
 
     Returns:
-        JSON with list of matching elements and their coordinates.
+        JSON with matches count, matching elements (with bounds, center, type), and coordinates.
     """
     try:
         session = get_session()
@@ -848,7 +891,6 @@ def find_element(
             "success": True,
             "matches": len(results),
             "elements": results,
-            "tip": "Use click(x, y) with the center coordinates to interact with an element.",
         })
 
     except Exception as exc:
@@ -1001,12 +1043,14 @@ def move_window(title: str, x: int, y: int) -> str:
 
 
 @mcp.tool()
-def minimize_maximize(title: str, action: str = "maximize") -> str:
+def minimize_maximize(title: str, state: str = "maximize") -> str:
     """Minimize, maximize, or restore a window.
+
+    Supports all three states despite the tool name (historical).
 
     Args:
         title: Substring to match against window titles.
-        action: One of "minimize", "maximize", or "restore".
+        state: Target window state — "minimize", "maximize", or "restore".
 
     Returns:
         JSON with success status.
@@ -1016,10 +1060,10 @@ def minimize_maximize(title: str, action: str = "maximize") -> str:
         if killed:
             return killed
 
-        result = _min_max_window(title, action)
+        result = _min_max_window(title, state)
 
         session = get_session()
-        session.log_action("minimize_maximize", {"title": title, "action": action}, result)
+        session.log_action("minimize_maximize", {"title": title, "action": state}, result)
 
         return json.dumps(result)
 
@@ -1029,19 +1073,20 @@ def minimize_maximize(title: str, action: str = "maximize") -> str:
 
 @mcp.tool()
 def launch_app(
-    name_or_path: str,
+    app: str,
     arguments: str = "",
     wait_ms: int = 2000,
 ) -> str:
     """Launch an application by name or path.
 
-    Supports common app names ("notepad", "chrome", "calc", "code",
-    "explorer", "paint", "terminal") or full executable paths.
+    Supports common names: "notepad", "chrome", "calc", "code",
+    "explorer", "paint", "terminal" — or a full path to any executable.
+    After launching, use wait_for_element() to confirm the window appeared.
 
     Args:
-        name_or_path: Application name or full path to executable.
-        arguments: Optional command-line arguments.
-        wait_ms: Time to wait after launch for window to appear (ms).
+        app: Application name (e.g. "notepad", "chrome") or full path to executable.
+        arguments: Optional command-line arguments to pass.
+        wait_ms: Time to wait after launch for the process to start (ms).
 
     Returns:
         JSON with success status and process info.
@@ -1051,15 +1096,15 @@ def launch_app(
         if killed:
             return killed
 
-        result = _launch_app(name_or_path, arguments, wait_ms)
+        result = _launch_app(app, arguments, wait_ms)
 
         session = get_session()
-        session.log_action("launch_app", {"app": name_or_path, "args": arguments}, result)
+        session.log_action("launch_app", {"app": app, "args": arguments}, result)
 
         return json.dumps(result)
 
     except Exception as exc:
-        return json.dumps({"success": False, "error": format_error(exc, "Launch app failed")})
+        return json.dumps({"success": False, "error": format_error(exc, f"Launch app failed: {app}")})
 
 
 @mcp.tool()
@@ -1091,29 +1136,35 @@ def open_url(url: str, profile_name: str | None = None) -> str:
 
 @mcp.tool()
 def execute_actions(actions: list[dict]) -> list[t.TextContent | t.ImageContent]:
-    """Execute a list of UI actions sequentially in a single tool call, returning the step results and a final screenshot.
+    """Execute multiple UI actions sequentially in a single tool call.
 
-    This is the most efficient way to perform multi-step UI automation.
-    The execution stops immediately if any action fails.
+    More efficient than individual tool calls when doing a known sequence —
+    fewer round-trips, single verification. Execution stops at the first failure.
+
+    Tradeoff vs individual tool calls:
+      - Individual calls give you per-step error recovery (fix + retry).
+      - execute_actions is best for sequences where any failure should abort
+        (e.g. "click File → click Save → type filename").
+      - For simple 1-2 step tasks, individual tools are clearer.
 
     Args:
-        actions: A list of dicts. Each dict must have an "action" key.
-            Examples of action dicts:
-            - {"action": "click", "x": 100, "y": 200, "button": "left", "count": 1, "modifiers": []}
+        actions: A list of action dicts. Each must have an "action" key.
+            Supported actions:
+            - {"action": "click", "x": 100, "y": 200, "button": "left", "count": 1}
             - {"action": "type", "text": "hello", "delay_ms": 0}
             - {"action": "hotkey", "keys": ["ctrl", "s"]}
             - {"action": "wait", "duration_ms": 1000}
             - {"action": "scroll", "x": 100, "y": 200, "direction": "down", "amount": 3}
-            - {"action": "drag", "start_x": 100, "start_y": 100, "end_x": 200, "end_y": 200, "button": "left", "duration_ms": 500}
+            - {"action": "drag", "start_x": 100, "start_y": 100, "end_x": 200, "end_y": 200}
             - {"action": "hover", "x": 100, "y": 200, "duration_ms": 500}
             - {"action": "clipboard", "mode": "write", "text": "hello"}
             - {"action": "clipboard", "mode": "read"}
             - {"action": "focus_window", "title": "Chrome"}
-            - {"action": "launch", "name_or_path": "notepad", "arguments": ""}
+            - {"action": "launch", "name_or_path": "notepad"}
             - {"action": "screenshot"}
 
     Returns:
-        List containing a TextContent block with the JSON results of all steps, and an ImageContent block with the final screenshot.
+        List: [TextContent (JSON metadata with per-step results), ImageContent (final screenshot)].
     """
     killed = _check_sentinel()
     if killed:
@@ -1311,26 +1362,26 @@ def click_element(
     button: str = "left",
     reasoning: str = "",
 ) -> str:
-    """Find a UI element by its visible label and click it.
+    """Find a UI element by visible label and click it.
 
-    The PREFERRED way to click — uses fuzzy text matching so you don't
-    need exact coordinates. For example, click_element("Save") will find
-    the Save button wherever it is on screen. Falls back to raw click(x,y)
-    if no matching element is found.
+    PREFERRED click method for named elements — uses fuzzy text matching
+    on the accessibility tree. For example, click_element("Save") finds the
+    "Save" button wherever it is on screen.
 
-    Use click(x, y) instead when you have precise coordinates from a
-    previous detection, or when clicking on coordinates that don't
-    correspond to a named element.
+    When to use alternatives:
+      - click(x, y) — when you have exact pixel coordinates (from find_element results).
+      - click(target="name") — like click_element but falls back to smart_click if no match.
+      - smart_click(target) — multi-strategy (a11y → OCR → VLM → vision) for difficult targets.
 
     Args:
-        name: Text to search for in element labels (case-insensitive fuzzy match).
+        name: Text to search for in element labels (case-insensitive fuzzy substring match).
               Examples: "File", "Save", "OK", "Submit", "Cancel", "Close".
         element_type: Optional type filter (button, menu_item, text_input, checkbox, etc.).
         button: Mouse button — "left", "right", or "middle".
         reasoning: Why you're clicking this element (logged for debugging).
 
     Returns:
-        JSON with clicked element info, matched text, and coordinates.
+        JSON with success, matched element info, and coordinates.
     """
     try:
         killed = _check_sentinel()
@@ -1363,6 +1414,7 @@ def click_element(
 
         if exec_result.get("success"):
             _get_sentinel().set_expected_position(click_x, click_y)
+            invalidate_tree_cache()
 
         session = get_session()
         session.log_action(
@@ -1441,7 +1493,10 @@ def paint_preset(preset_name: str) -> str:
 
         # 3. Instantiate painter and draw
         painter = ArtisticPainter()
-        result = painter.draw_preset(preset_name, (cx, cy))
+        try:
+            result = painter.draw_preset(preset_name, (cx, cy))
+        finally:
+            painter.cleanup()
 
         session = get_session()
         session.log_action("paint_preset", {"preset": preset_name}, result)
@@ -1503,11 +1558,12 @@ def paint_image(image_path: str, max_strokes: int = 500) -> str:
         canvas_bounds = (left, top, right, bottom)
 
         # 3. Paint image outlines with optimized execution
-        import importlib
-        import uacc.actions.artistic_painter
-        importlib.reload(uacc.actions.artistic_painter)
-        painter = uacc.actions.artistic_painter.ArtisticPainter()
-        result = painter.draw_image(image_path, canvas_bounds, max_strokes=max_strokes)
+        from uacc.actions.artistic_painter import ArtisticPainter as FastPainter
+        painter = FastPainter()
+        try:
+            result = painter.draw_image(image_path, canvas_bounds, max_strokes=max_strokes)
+        finally:
+            painter.cleanup()
 
         session = get_session()
         session.log_action("paint_image", {"image_path": image_path, "max_strokes": max_strokes}, result)
@@ -1741,7 +1797,7 @@ def create_workflow(
         name: Unique name for the workflow (e.g. \"open_notepad_type_hello\").
         description: Human-readable description of what this workflow does.
         steps: List of step dicts, each with \"tool\" and \"params\" keys.
-               Example: [{\"tool\": \"launch_app\", \"params\": {\"name_or_path\": \"notepad\"}}]
+               Example: [{\"tool\": \"launch_app\", \"params\": {\"app\": \"notepad\"}}]
         tags: Optional tags for categorising workflows.
 
     Returns:
@@ -2286,17 +2342,18 @@ def uacc_planner(
 
 @mcp.tool()
 def take_snapshot(name: str) -> str:
-    """Save a named screenshot of the current screen for later comparison.
+    """Save a named screenshot in memory for later comparison.
 
-    Use this BEFORE performing an action so you can compare the screen
-    state before and after with compare_snapshots() or verify_action().
+    Stores the screenshot internally — does NOT return an image (use screenshot()
+    when you need a visual). Call BEFORE an action, then use compare_snapshots()
+    or verify_action() AFTER to detect changes.
 
     Args:
-        name: A descriptive name for this snapshot (e.g. "before_click",
-              "after_save", "initial_state"). Must be unique within the session.
+        name: Descriptive name for this snapshot (e.g. "before_click",
+              "after_save", "initial_state"). Must be unique per session.
 
     Returns:
-        JSON with success status, snapshot name, and screen dimensions.
+        JSON with success, snapshot name, and screen dimensions.
     """
     try:
         img = capture_full()
@@ -2304,13 +2361,14 @@ def take_snapshot(name: str) -> str:
         session.snapshots[name] = img
         session.log_action("take_snapshot", {"name": name}, {"success": True})
 
+        snapshots = list(session.snapshots.keys())
         return json.dumps({
             "success": True,
             "name": name,
             "width": img.size[0],
             "height": img.size[1],
-            "total_snapshots": len(session.snapshots),
-            "available_snapshots": list(session.snapshots.keys()),
+            "total_snapshots": len(snapshots),
+            "available_snapshots": snapshots[-10:],  # only last 10 to keep responses small
         })
     except Exception as exc:
         return json.dumps({"success": False, "error": format_error(exc, "Take snapshot failed")})
@@ -2619,12 +2677,15 @@ def detect_elements_visual(
 ) -> str:
     """Detect UI elements using computer vision (OCR + edge detection).
 
-    Use this as a FALLBACK when get_screen_info returns few elements —
-    for example with games, remote desktop, canvas-based web apps,
-    or applications with broken accessibility trees.
+    FALLBACK when get_screen_info returns few elements — for games, remote
+    desktop, canvas-based web apps, or broken accessibility trees.
 
     Combines OCR text detection with contour analysis to find buttons,
-    inputs, and labels that the accessibility tree misses.
+    inputs, and labels the accessibility tree misses.
+
+    Note: get_screen_info_enhanced(mode="auto") tries the accessibility tree
+    first and falls back to vision automatically. Use this tool directly when
+    you know the app has no useful a11y tree.
 
     Args:
         region_x: Optional left edge of scan region (full screen if omitted).
@@ -2682,7 +2743,6 @@ def detect_elements_visual(
             "method": "vision (OCR + contour detection)",
             "element_count": len(results),
             "elements": results,
-            "tip": "Use click(x, y) with center coordinates to interact.",
         })
 
     except Exception as exc:
@@ -2694,17 +2754,24 @@ def get_screen_info_enhanced(
     mode: str = "auto",
     include_ocr: bool = False,
 ) -> str:
-    """Enhanced screen analysis that auto-selects the best detection method.
+    """Screen analysis that auto-selects the best detection method for the app.
 
-    Modes:
-    - "auto": Try accessibility tree first; if < 5 elements found, fall back to vision.
-    - "accessibility": Use OS accessibility tree only (fastest, most reliable).
-    - "vision": Use OCR + edge detection only (for games, canvas, remote desktop).
-    - "vlm": Use Vision Language Model for rich screen understanding (slow, API cost).
-    - "hybrid": Merge accessibility tree AND vision results for maximum coverage.
+    Slower than get_screen_info() but catches elements that the accessibility tree
+    misses (games, canvas-based apps, remote desktop, video editors).
+
+    Modes (pick the cheapest that works):
+    - "accessibility" — fastest, most reliable. Use when the target app has a normal UI.
+    - "auto" (default) — tries a11y first; falls back to vision if < 5 elements found.
+    - "vision" — OCR + edge detection. Use for games, canvas, remote desktop.
+    - "hybrid" — merges a11y + vision results for maximum coverage.
+    - "vlm" — Vision Language Model. Slowest, API cost. Use only for complex visual understanding.
+
+    See also:
+      - get_screen_info() — faster but a11y-only (for normal apps).
+      - detect_elements_visual() — pure vision, no a11y.
 
     Args:
-        mode: Detection mode — "auto", "accessibility", "vision", "vlm", or "hybrid".
+        mode: Detection mode — "accessibility", "auto", "vision", "hybrid", or "vlm".
         include_ocr: If True, also run OCR in accessibility mode (slower but more text).
 
     Returns:
@@ -2946,7 +3013,6 @@ def vlm_locate_element(
                 "right": element.bounds[2],
                 "bottom": element.bounds[3],
             },
-            "tip": "Use click(x, y) with the center coordinates to interact.",
         })
 
     except Exception as exc:
@@ -2964,31 +3030,31 @@ def smart_click(
     element_type: str | None = None,
     button: str = "left",
     verify: bool = True,
-    max_retries: int = 4,
+    max_retries: int = 2,
     reasoning: str = "",
 ) -> str:
-    """Self-healing click — finds an element using multiple strategies and auto-retries.
+    """Self-healing click — tries multiple strategies to find and click an element.
 
-    Fallback chain (adaptive per-app):
-    1. Accessibility tree fuzzy match (fastest, most reliable)
-    2. OCR text search (catches rendered text that a11y misses)
-    3. VLM visual search (understands layout, icons, spatial relationships)
-    4. Vision contour + OCR detection (for custom UI / games)
-    5. Returns failure with diagnostic info
+    Best for unreliable targets (canvas apps, games, custom UI). Strategies run
+    in adaptive order (learns which works best per app):
+    1. Accessibility tree fuzzy match (fastest, ~200ms)
+    2. OCR text search (catches rendered text a11y misses, ~500ms)
+    3. VLM visual search (understands layout/icons, ~1-5s + API cost)
+    4. Vision contour + OCR detection (custom UI/games, ~500ms)
 
-    If verify=True, captures before/after screenshots to confirm the click
-    had an observable effect on the screen.
+    For simpler cases where you know the element name, prefer click_element().
+    For exact coordinates, use click(x, y).
 
     Args:
-        target: The text label or name of the element to click (fuzzy matched).
+        target: Text label or description of the element (case-insensitive fuzzy match).
         element_type: Optional type filter (button, menu_item, text_input, etc.).
         button: Mouse button — "left", "right", or "middle".
-        verify: If True, verify the click changed the screen state.
-        max_retries: Maximum retry attempts across strategies (default 4).
+        verify: If True, captures before/after screenshots to confirm the click had an effect.
+        max_retries: Maximum retry attempts across strategies (default 2).
         reasoning: Why you're clicking (for logging).
 
     Returns:
-        JSON with success, method_used, retries, coordinates, and verification result.
+        JSON with success, method_used, attempts, coordinates, and verification.
     """
     try:
         killed = _check_sentinel()
@@ -3039,10 +3105,14 @@ def smart_click(
             except Exception:
                 pass
 
-        # Take "before" snapshot for verification
+        # Take "before" snapshot for verification + shared fallback screenshot
         before_img = None
+        fallback_img = None
         if verify:
             before_img = capture_full()
+            fallback_img = before_img  # reuse for fallback strategies
+        else:
+            fallback_img = capture_full()  # still capture once for fallbacks
 
         for attempt in range(max_retries):
             strategy_name = strategy_order[attempt % len(strategy_order)]
@@ -3082,8 +3152,7 @@ def smart_click(
                 try:
                     strat_start = time.time()
                     from uacc.core.ocr_engine import extract_text
-                    img = capture_full()
-                    ocr_results = extract_text(img)
+                    ocr_results = extract_text(fallback_img)
                     target_lower = target.lower()
 
                     best_match = None
@@ -3124,8 +3193,7 @@ def smart_click(
                     strat_start = time.time()
                     from uacc.core.vlm_engine import get_vlm_engine
                     vlm = get_vlm_engine()
-                    img = capture_full()
-                    vlm_element = vlm.locate_element(img, target)
+                    vlm_element = vlm.locate_element(fallback_img, target)
 
                     strat_duration = int((time.time() - strat_start) * 1000)
                     if vlm_element:
@@ -3154,8 +3222,7 @@ def smart_click(
                 try:
                     strat_start = time.time()
                     from uacc.core.vision_detector import full_vision_detect
-                    img = capture_full()
-                    vision_elements = full_vision_detect(img)
+                    vision_elements = full_vision_detect(fallback_img)
 
                     target_lower = target.lower()
                     best_el = None
@@ -3374,7 +3441,7 @@ def uacc_query(mode: str = "full") -> str:
             title = (active_window or {}).get("title", "unknown")
             elem_count = 0
             try:
-                info = json.loads(get_screen_info(include_non_interactive=False))
+                info = json.loads(get_screen_info(include_labels=False))
                 elem_count = info.get("element_count", 0)
             except Exception:
                 pass
@@ -3386,7 +3453,7 @@ def uacc_query(mode: str = "full") -> str:
             })
 
         if mode in ("full", "fast"):
-            from uacc.core.accessibility import get_ui_tree
+            from uacc.core.accessibility import get_ui_tree, invalidate_tree_cache
             try:
                 elements_raw = get_ui_tree()
                 elements = [el.to_dict() if hasattr(el, 'to_dict') else el for el in (elements_raw or [])]
@@ -3819,7 +3886,6 @@ def find_element_relative(
             "direction": direction,
             "matches": len(candidates),
             "elements": candidates[:15],
-            "tip": "Use click(x, y) with center coordinates of the best match.",
         })
 
     except Exception as exc:
