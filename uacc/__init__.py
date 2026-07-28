@@ -10,7 +10,7 @@ This module strips the host agent's site-packages from sys.path so that
 UACC's pip-installed dependencies resolve correctly.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 import sys as _sys
 
