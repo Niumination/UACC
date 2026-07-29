@@ -14,8 +14,9 @@ __version__ = "1.1.0"
 
 import sys as _sys
 
-_host_prefixes = ("hermes-agent", "hermes")
-_sys.path = [p for p in _sys.path if not any(h in p.lower() for h in _host_prefixes)]
+# Host-agent venv filtering disabled — UACC is intentionally installed
+# in the Hermes venv. If binary wheel conflicts arise, handle them per-package.
+# _sys.path = [p for p in _sys.path if not ("hermes" in p.lower() and "site-packages" in p.lower())]
 
 # Enable Windows Per-Monitor DPI awareness so screenshot dimensions match cursor coordinate systems 1:1
 if _sys.platform == "win32":
