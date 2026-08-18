@@ -173,6 +173,24 @@ UACC builds a semantic graph of cross-session automation patterns and supports B
 
 UACC automatically initializes Windows Per-Monitor DPI Awareness (`SetProcessDpiAwareness(2)`) at import time. This guarantees that screen captures (`mss`) and mouse coordinate systems (`pyautogui`/Win32) operate in 1:1 physical pixels without scaling drift on high-DPI or scaled displays (125%, 150%, 200%).
 
+## 🧭 Improvement Roadmap (from AIRI computer-use-mcp)
+
+UACC sudah punya fondasi kuat (68 tools, workflow memory, CDP bridge). Berikut gap
+yang diidentifikasi dari proyek eksternal [moeru-ai/airi](https://github.com/moeru-ai/airi)
+`services/computer-use-mcp` untuk dipertimbangkan ke depannya:
+
+| Gap | AIRI punya | UACC punya | Prioritas |
+|-----|-----------|-----------|:---------:|
+| **Executor abstraction** | dry-run / macos-local / linux-x11 | — | 🟡 Future |
+| **Audit trail** | audit.jsonl per session + screenshots | — | 🟡 Future |
+| **Terminal exec** | `terminal_exec` background shell | — | 🟡 Future |
+| **Approval queue** | per-action + session reuse | `acknowledge_user_override` | 🟢 Nice-to-have |
+| **Workflow composition** | workspace validate, test run, inspect failure | `uacc_planner` + `create_workflow` | ✅ Already covered |
+
+> ⚠️ **Catatan:** Ini dokumentasi gap saja, bukan komitmen implementasi. UACC
+> adalah fork dari upstream `uacc-project/uacc`. Setiap perubahan kode harus
+> dievaluasi biaya divergensi vs manfaatnya.
+
 ## Environment
 
 - UACC root: `C:\Users\chris\Desktop\UACC`
